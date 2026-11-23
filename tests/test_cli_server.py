@@ -114,6 +114,13 @@ def test_api_decompile_explain_slice_and_download(tmp_path: Path) -> None:
     assert "guard_trace" in exp
     assert "summary_text" in exp
 
+    for endpoint, payload in [
+        ("/api/explain", {"x": [2.0, 0.0]}),
+        ("/api/slice", {"dim_x": 0, "dim_y": 0}),
+        ("/api/slice", {"dim_x": 0, "dim_y": 1, "fixed_values": [-2.0, 0.0]}),
+    ]:
+        assert client.post(endpoint, json={"run_id": run_id, **payload}).status_code == 400
+
     res_bundle = client.get(f"/api/runs/{run_id}/bundle")
     assert res_bundle.status_code == 200
     assert res_bundle.json()["run_id"] == run_id

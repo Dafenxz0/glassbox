@@ -164,17 +164,19 @@ def collect_program_usage(node: RegimeNode) -> tuple[set[int], set[str]]:
     return used_vars, used_ops
 
 
-def render_expr(expr: Expr, var_names: Sequence[str], dialect: ExprDialect) -> str:
+def render_expr(
+    expr: Expr, var_names: Sequence[str], dialect: ExprDialect, *, group: bool = True
+) -> str:
     """Render an IR Expr AST into a target-language expression string."""
     if isinstance(expr, VarExpr):
         return var_names[expr.index]
     if isinstance(expr, ConstExpr):
         lit = format_float_literal(expr.value)
-        return f"({lit})" if lit.startswith("-") else lit
+        return f"({lit})" if group and lit.startswith("-") else lit
     if isinstance(expr, UnaryExpr):
         inner = render_expr(expr.operand, var_names, dialect)
         if expr.op == "neg":
-            return f"(-{inner})"
+            return f"(-{inner})" if group else f"-{inner}"
         if expr.op in dialect.method_unary:
             fn = getattr(dialect, f"{expr.op}_fn")
             return f"({inner}).{fn}()"
@@ -191,7 +193,8 @@ def render_expr(expr: Expr, var_names: Sequence[str], dialect: ExprDialect) -> s
         right = render_expr(expr.right, var_names, dialect)
         op_sym = {"add": "+", "sub": "-", "mul": "*", "div": "/"}.get(expr.op)
         if op_sym is not None:
-            return f"({left} {op_sym} {right})"
+            value = f"{left} {op_sym} {right}"
+            return f"({value})" if group else value
         fn_name = dialect.min_fn if expr.op == "min" else dialect.max_fn
         return f"{fn_name}({left}, {right})"
     if isinstance(expr, ClampExpr):

@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, FiniteFloat, model_validator
 
 if TYPE_CHECKING:
     from glassbox.ir import DecompileResult
@@ -44,8 +44,8 @@ class DomainSpec(BaseModel):
     """Bounded input/output domain specification for verification and synthesis."""
 
     feature_names: list[str]
-    lower_bounds: list[float]
-    upper_bounds: list[float]
+    lower_bounds: list[FiniteFloat]
+    upper_bounds: list[FiniteFloat]
     output_names: list[str]
     task_type: TaskType
     class_names: list[str] = Field(default_factory=list)
@@ -266,6 +266,8 @@ class BundleVerificationReport(BaseModel):
 
     verdict: Literal[
         "VERIFIED_REPRODUCED",
+        "ARTIFACTS_CHECKED",
+        "REPLAY_RESOLVED",
         "HASH_MISMATCH",
         "FALSIFIED_BY_REPLAY",
         "TIMEOUT",

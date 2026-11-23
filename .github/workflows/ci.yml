@@ -32,10 +32,20 @@ jobs:
       - name: Install GlassBox with dev dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e ".[dev]"
 
       - name: Run Ruff lint checks
         run: ruff check src tests scripts
+
+      - name: Check Studio and build its static distribution
+        run: |
+          node --check studio/app.js
+          node --check site/assets/home.js
+          python scripts/build_web.py
+
+      - name: Replay the versioned drone proof
+        run: glassbox verify bundles/drone_altitude_pid.gbundle --timeout 30
 
       - name: Run pytest suite
         run: pytest -v
@@ -50,4 +60,4 @@ jobs:
           /tmp/gb_clang_test
           rustc --test -D warnings /tmp/gb_out/drone_altitude_pid.rs -o /tmp/gb_rs_test
           /tmp/gb_rs_test
-          glassbox verify /tmp/gb_out/drone_altitude_pid.gbundle
+          glassbox verify /tmp/gb_out/drone_altitude_pid.gbundle --timeout 30
