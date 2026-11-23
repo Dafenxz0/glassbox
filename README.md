@@ -4,7 +4,9 @@ GlassBox decompiles a small feed-forward ONNX network into a readable, branch-ba
 
 [Open GlassBox Studio](https://dafenxz0.github.io/glassbox/studio/) · [Project website](https://dafenxz0.github.io/glassbox/) · [Benchmark ledger](docs/BENCHMARKS.md)
 
-[![Recorded altitude controller. White boundaries separate its nine decision regions at battery_v = 11.55.](site/assets/drone-regimes.png)](https://dafenxz0.github.io/glassbox/studio/?model=drone_altitude_pid)
+[![GlassBox website with the recorded thrust surface and interactive input trace.](site/share.jpg)](https://dafenxz0.github.io/glassbox/)
+
+Move the altitude input on the project website to compare the network and program outputs at 48 recorded samples. Expand the active C99 branch or open the [nine-region proof in Studio](https://dafenxz0.github.io/glassbox/studio/?model=drone_altitude_pid&certificate=1).
 
 ## Try a real proof
 

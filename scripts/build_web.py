@@ -9,7 +9,7 @@ DIST = ROOT / "dist"
 def main() -> None:
     assets = (
         "index.html", "favicon.svg", "share.jpg", "assets/glassbox.css",
-        "assets/home.js", "assets/drone-regimes.png", "assets/fonts",
+        "assets/home.js", "assets/drone-surface.svg", "assets/drone-trace.json", "assets/fonts",
     )
     for name in assets:
         src = ROOT / "site" / name

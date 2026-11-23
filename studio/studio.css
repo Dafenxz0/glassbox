@@ -9,12 +9,12 @@
   src: url(../assets/fonts/plex-mono.woff2) format("woff2");
   font-display: swap;
 }
-/* GlassBox Studio 2.0 — Taste Skill v2.5.1 + modern-web-guidance */
+/* Shared typography and light/dark instrument surfaces. */
 
 :root {
   color-scheme: light dark;
 
-  /* Taste Skill tokens + adaptive light-dark() surfaces */
+  /* Interface colors */
   --p-bg: #ffffff;
   --p-surface: #f4f4f4;
   --p-ink: #111111;
@@ -26,25 +26,25 @@
   --p-inv-ink: #ffffff;
   --p-inv-muted: #9a9a9a;
 
-  --bg: light-dark(#f5f7fa, #102027);
-  --surface: light-dark(#ffffff, #192a32);
-  --surface-elevated: light-dark(#ffffff, #242424);
-  --ink: light-dark(#142832, #ecf6f6);
-  --muted: light-dark(#526674, #afc0c8);
-  --accent: light-dark(#1a4be0, #4d7cfe);
-  --accent-hover: light-dark(#143bb5, #3a6af0);
-  --accent-soft: light-dark(#edf2ff, #172645);
-  --accent-ink: #ffffff;
-  --border: light-dark(#d1dbe0, #334750);
-  --border-strong: light-dark(#c8c8c8, #444444);
+  --bg: light-dark(#f3f3ec, #191c17);
+  --surface: light-dark(#fbfbf6, #23271f);
+  --surface-elevated: light-dark(#fffffc, #2c3028);
+  --ink: light-dark(#24271f, #f1f2e8);
+  --muted: light-dark(#585e50, #b8bdae);
+  --accent: light-dark(#79442e, #edac91);
+  --accent-hover: light-dark(#63321f, #f5bda4);
+  --accent-soft: light-dark(#f4e9df, #3a2a22);
+  --accent-ink: light-dark(#fff, #282018);
+  --border: light-dark(#d3d5c9, #454a3e);
+  --border-strong: light-dark(#a9af9e, #686f5e);
 
   /* Terminal / code surfaces (always crisp dark terminal per studio spec) */
-  --code-bg: #101e24;
+  --code-bg: #1d211b;
   --code-surface: #1a1a1a;
   --code-ink: #f4f4f4;
-  --code-muted: #a4b9bc;
+  --code-muted: #bcc3b1;
   --code-border: #2c2c2c;
-  --code-highlight: rgba(77, 124, 254, 0.16);
+  --code-highlight: rgba(231, 167, 130, 0.17);
 
   /* Status tokens (emerald, teal, amber, red, neutral — zero violet/lavender) */
   --emerald: light-dark(#0d8a55, #34d399);
@@ -62,8 +62,8 @@
   --display-tracking: -0.035em;
 
   --r-sm: 4px;
-  --r-md: 6px;
-  --r-lg: 8px;
+  --r-md: 3px;
+  --r-lg: 4px;
   --r-btn: 4px;
 
   scrollbar-color: var(--border-strong) transparent;
@@ -85,9 +85,9 @@
     --surface-elevated: #ffffff;
     --ink: #111111;
     --muted: #6b6b6b;
-    --accent: #1a4be0;
-    --accent-hover: #143bb5;
-    --accent-soft: #edf2ff;
+    --accent: #79442e;
+    --accent-hover: #63321f;
+    --accent-soft: #f4e9df;
     --border: #e2e2e2;
     --border-strong: #c8c8c8;
     --emerald: #0d8a55;
@@ -191,6 +191,8 @@ body {
   font-size: 16px;
   letter-spacing: var(--display-tracking);
 }
+
+.brand-link img { background: #f7f7f1; border-radius: 3px; }
 
 .brand-link:hover {
   color: var(--accent);
@@ -1598,9 +1600,7 @@ dialog::backdrop {
 }
 
 .cert-kv {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
+  border-top: 1px solid var(--border);
   padding: 8px 10px;
 }
 

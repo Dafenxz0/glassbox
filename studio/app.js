@@ -317,6 +317,11 @@
         state.models.find((m) => m.id === new URLSearchParams(location.search).get("model")) ||
         state.models.find((m) => m.id === "drone_altitude_pid") || state.models[0];
       await selectModel(preferred.id);
+      if (state.currentModelId === preferred.id && state.currentResult?.certificate &&
+          new URLSearchParams(location.search).get("certificate") === "1") {
+        renderCertDialog();
+        els.certDialog.showModal();
+      }
     } else {
       showBanner("No models found. Run glassbox studio or generate demo-data artifacts.");
     }
