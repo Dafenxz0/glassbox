@@ -1,11 +1,9 @@
-"""Runtime latency and numerical fidelity benchmarks across execution targets."""
+"""Runtime latency, sustained throughput, and numerical fidelity benchmarks."""
 
 from __future__ import annotations
 
 import ctypes
 import io
-import re
-import subprocess
 import sys
 import tempfile
 import time
@@ -17,6 +15,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from glassbox.emitters import compile_c_shared, find_c_compiler
 from glassbox.ir import DecompiledProgram
 from glassbox.types import BenchmarkEntry
 
@@ -27,32 +26,46 @@ if sys.platform == "win32":
     import _ctypes
 
 
-def _summarize_latencies(latencies_us: list[float]) -> tuple[float, float, float, float]:
-    arr = np.asarray(latencies_us, dtype=np.float64)
-    p50 = float(np.percentile(arr, 50))
-    p95 = float(np.percentile(arr, 95))
-    p99 = float(np.percentile(arr, 99))
-    throughput = 1_000_000.0 / max(p50, 1e-6)
-    return p50, p95, p99, throughput
+def _percentiles(values: list[float]) -> tuple[float, float, float]:
+    arr = np.asarray(values, dtype=np.float64)
+    return (
+        float(np.percentile(arr, 50)),
+        float(np.percentile(arr, 95)),
+        float(np.percentile(arr, 99)),
+    )
 
 
-def _time_single_calls(
+def _measure_calls(
     fn: Callable[[int], Any],
-    n_samples: int,
+    n_slots: int,
     n_warmup: int,
     n_iters: int,
-) -> list[float]:
+    batch_size: int = 1,
+) -> tuple[float, float, float, float]:
+    """Return (p50_us_per_sample, p95_us_per_sample, p99_us_per_sample, measured_throughput_ips)."""
     for i in range(max(0, n_warmup)):
-        fn(i % n_samples)
-    latencies_us: list[float] = []
+        fn(i % n_slots)
+
     iters = max(1, n_iters)
+    latencies_us: list[float] = []
+    scale = 1000.0 * max(1, batch_size)
     for i in range(iters):
-        idx = i % n_samples
+        idx = i % n_slots
         t0 = time.perf_counter_ns()
         fn(idx)
         t1 = time.perf_counter_ns()
-        latencies_us.append((t1 - t0) / 1000.0)
-    return latencies_us
+        latencies_us.append((t1 - t0) / scale)
+
+    p50, p95, p99 = _percentiles(latencies_us)
+
+    # Measure uninterrupted sustained wall-clock throughput without per-call timer overhead.
+    t_start = time.perf_counter_ns()
+    for i in range(iters):
+        fn(i % n_slots)
+    t_end = time.perf_counter_ns()
+    wall_s = max((t_end - t_start) / 1e9, 1e-9)
+    measured_ips = float((iters * max(1, batch_size)) / wall_s)
+    return p50, p95, p99, measured_ips
 
 
 def _build_torch_sequential(model: LoadedModel) -> tuple[nn.Sequential | None, int]:
@@ -83,7 +96,7 @@ def _build_torch_sequential(model: LoadedModel) -> tuple[nn.Sequential | None, i
     return seq, len(buf.getvalue())
 
 
-def _benchmark_onnx(
+def _benchmark_onnx_batch1(
     model: LoadedModel,
     X_test: np.ndarray,
     ref_nn: np.ndarray,
@@ -99,26 +112,83 @@ def _benchmark_onnx(
     max_diff = float(np.max(np.abs(Y_onnx - ref_nn)))
 
     model_path = Path(model.metadata.path)
-    artifact_bytes = model_path.stat().st_size if model_path.exists() else model.metadata.size_bytes
+    artifact_bytes = int(
+        model_path.stat().st_size if model_path.exists() else model.metadata.size_bytes
+    )
 
-    latencies = _time_single_calls(
+    p50, p95, p99, measured_ips = _measure_calls(
         lambda idx: sess.run(None, {input_name: samples_f32[idx]}),
         len(samples_f32),
         n_warmup,
         n_iters,
+        batch_size=1,
     )
-    p50, p95, p99, throughput = _summarize_latencies(latencies)
     return BenchmarkEntry(
-        runtime="ONNX Runtime (CPU)",
+        runtime="ONNX Runtime (CPU, batch=1)",
         p50_us=p50,
         p95_us=p95,
         p99_us=p99,
-        throughput_ips=throughput,
-        artifact_bytes=int(artifact_bytes),
+        throughput_ips=measured_ips,
+        measured_throughput_ips=measured_ips,
+        batch_size=1,
+        artifact_bytes=artifact_bytes,
+        binary_bytes=artifact_bytes,
         speedup_vs_onnx=1.0,
         max_diff_vs_ref=max_diff,
         available=True,
-        note="batch=1 vs model.predict reference",
+        note="single-sample control-loop latency vs model.predict",
+    )
+
+
+def _benchmark_onnx_batch64(
+    model: LoadedModel,
+    X_test: np.ndarray,
+    ref_nn: np.ndarray,
+    onnx_b1_p50: float,
+    n_warmup: int,
+    n_iters: int,
+) -> BenchmarkEntry:
+    sess = model.session
+    input_name = sess.get_inputs()[0].name
+    X_f32 = X_test.astype(np.float32)
+    Y_onnx_full = np.asarray(sess.run(None, {input_name: X_f32})[0], dtype=np.float64)
+    max_diff = float(np.max(np.abs(Y_onnx_full - ref_nn)))
+
+    batch_size = 64
+    n_test = len(X_f32)
+    batches_f32 = [
+        np.take(X_f32, np.arange(k * batch_size, (k + 1) * batch_size) % n_test, axis=0)
+        for k in range(16)
+    ]
+
+    model_path = Path(model.metadata.path)
+    artifact_bytes = int(
+        model_path.stat().st_size if model_path.exists() else model.metadata.size_bytes
+    )
+    batch_warmup = max(5, n_warmup // 4)
+    batch_iters = max(25, n_iters // 8)
+
+    p50, p95, p99, measured_ips = _measure_calls(
+        lambda idx: sess.run(None, {input_name: batches_f32[idx]}),
+        len(batches_f32),
+        batch_warmup,
+        batch_iters,
+        batch_size=batch_size,
+    )
+    return BenchmarkEntry(
+        runtime="ONNX Runtime (CPU, batch=64)",
+        p50_us=p50,
+        p95_us=p95,
+        p99_us=p99,
+        throughput_ips=measured_ips,
+        measured_throughput_ips=measured_ips,
+        batch_size=batch_size,
+        artifact_bytes=artifact_bytes,
+        binary_bytes=artifact_bytes,
+        speedup_vs_onnx=onnx_b1_p50 / max(p50, 1e-6),
+        max_diff_vs_ref=max_diff,
+        available=True,
+        note="amortized per-sample latency across batch=64",
     )
 
 
@@ -126,44 +196,50 @@ def _benchmark_pytorch(
     model: LoadedModel,
     X_test: np.ndarray,
     ref_nn: np.ndarray,
-    onnx_p50: float,
+    onnx_b1_p50: float,
     n_warmup: int,
     n_iters: int,
 ) -> BenchmarkEntry:
     seq, artifact_bytes = _build_torch_sequential(model)
     if seq is not None:
-        samples_t = [torch.from_numpy(X_test[i : i + 1].astype(np.float32)) for i in range(len(X_test))]
+        samples_t = [
+            torch.from_numpy(X_test[i : i + 1].astype(np.float32)) for i in range(len(X_test))
+        ]
         with torch.inference_mode():
             Y_pt = np.vstack([seq(s).numpy() for s in samples_t]).astype(np.float64)
             max_diff = float(np.max(np.abs(Y_pt - ref_nn)))
-            latencies = _time_single_calls(
+            p50, p95, p99, measured_ips = _measure_calls(
                 lambda idx: seq(samples_t[idx]),
                 len(samples_t),
                 n_warmup,
                 n_iters,
+                batch_size=1,
             )
-        note = "reconstructed nn.Sequential vs model.predict"
+        note = "reconstructed nn.Sequential eager batch=1 vs model.predict"
     else:
         samples_f64 = [X_test[i : i + 1] for i in range(len(X_test))]
         Y_pt = np.vstack([model.predict(s) for s in samples_f64])
         max_diff = float(np.max(np.abs(Y_pt - ref_nn)))
-        latencies = _time_single_calls(
+        p50, p95, p99, measured_ips = _measure_calls(
             lambda idx: model.predict(samples_f64[idx]),
             len(samples_f64),
             n_warmup,
             n_iters,
+            batch_size=1,
         )
         note = "fallback to model.predict (non-MLP)"
 
-    p50, p95, p99, throughput = _summarize_latencies(latencies)
     return BenchmarkEntry(
-        runtime="PyTorch (Eager CPU)",
+        runtime="PyTorch (Eager CPU, batch=1)",
         p50_us=p50,
         p95_us=p95,
         p99_us=p99,
-        throughput_ips=throughput,
+        throughput_ips=measured_ips,
+        measured_throughput_ips=measured_ips,
+        batch_size=1,
         artifact_bytes=int(artifact_bytes),
-        speedup_vs_onnx=onnx_p50 / max(p50, 1e-6),
+        binary_bytes=int(artifact_bytes),
+        speedup_vs_onnx=onnx_b1_p50 / max(p50, 1e-6),
         max_diff_vs_ref=max_diff,
         available=True,
         note=note,
@@ -174,11 +250,12 @@ def _benchmark_python(
     emitted_code: dict[str, str],
     X_test: np.ndarray,
     ref_prog: np.ndarray,
-    onnx_p50: float,
+    onnx_b1_p50: float,
     n_warmup: int,
     n_iters: int,
 ) -> BenchmarkEntry:
     py_src = emitted_code.get("python", "")
+    py_bytes = len(py_src.encode("utf-8"))
     if not py_src.strip():
         return BenchmarkEntry(
             runtime="Decompiled Python (Zero-Dep)",
@@ -186,7 +263,11 @@ def _benchmark_python(
             p95_us=0.0,
             p99_us=0.0,
             throughput_ips=0.0,
+            measured_throughput_ips=0.0,
+            batch_size=1,
             artifact_bytes=0,
+            source_bytes=0,
+            binary_bytes=0,
             speedup_vs_onnx=0.0,
             max_diff_vs_ref=0.0,
             available=False,
@@ -203,7 +284,11 @@ def _benchmark_python(
             p95_us=0.0,
             p99_us=0.0,
             throughput_ips=0.0,
-            artifact_bytes=len(py_src.encode("utf-8")),
+            measured_throughput_ips=0.0,
+            batch_size=1,
+            artifact_bytes=py_bytes,
+            source_bytes=py_bytes,
+            binary_bytes=0,
             speedup_vs_onnx=0.0,
             max_diff_vs_ref=0.0,
             available=False,
@@ -221,119 +306,107 @@ def _benchmark_python(
     Y_py = np.asarray([_eval_one(r) for r in samples_py], dtype=np.float64)
     max_diff = float(np.max(np.abs(Y_py - ref_prog)))
 
-    latencies = _time_single_calls(
+    p50, p95, p99, measured_ips = _measure_calls(
         lambda idx: infer_fn(samples_py[idx]),
         len(samples_py),
         n_warmup,
         n_iters,
+        batch_size=1,
     )
-    p50, p95, p99, throughput = _summarize_latencies(latencies)
     return BenchmarkEntry(
         runtime="Decompiled Python (Zero-Dep)",
         p50_us=p50,
         p95_us=p95,
         p99_us=p99,
-        throughput_ips=throughput,
-        artifact_bytes=len(py_src.encode("utf-8")),
-        speedup_vs_onnx=onnx_p50 / max(p50, 1e-6),
+        throughput_ips=measured_ips,
+        measured_throughput_ips=measured_ips,
+        batch_size=1,
+        artifact_bytes=py_bytes,
+        source_bytes=py_bytes,
+        binary_bytes=0,
+        speedup_vs_onnx=onnx_b1_p50 / max(p50, 1e-6),
         max_diff_vs_ref=max_diff,
         available=True,
         note="zero-dep Python vs program.predict",
     )
 
 
-def _benchmark_c99(
-    program: DecompiledProgram,
-    emitted_code: dict[str, str],
-    X_test: np.ndarray,
-    ref_prog: np.ndarray,
-    onnx_p50: float,
-    work_dir: Path | None,
-    n_warmup: int,
-    n_iters: int,
-) -> BenchmarkEntry:
-    c_src = emitted_code.get("c", "")
-    h_src = emitted_code.get("h", "")
-    c_bytes = len(c_src.encode("utf-8"))
-    if not c_src.strip():
-        return BenchmarkEntry(
-            runtime="Decompiled C99 (Native DLL)",
+def _unavailable_c_entries(c_bytes: int, note: str, compiler: str = "") -> list[BenchmarkEntry]:
+    return [
+        BenchmarkEntry(
+            runtime="Decompiled C99 (ctypes FFI)",
             p50_us=0.0,
             p95_us=0.0,
             p99_us=0.0,
             throughput_ips=0.0,
-            artifact_bytes=0,
+            measured_throughput_ips=0.0,
+            batch_size=1,
+            artifact_bytes=c_bytes,
+            source_bytes=c_bytes,
+            binary_bytes=0,
+            compiler=compiler,
             speedup_vs_onnx=0.0,
             max_diff_vs_ref=0.0,
             available=False,
-            note="missing emitted C99 code",
-        )
+            note=note,
+        ),
+        BenchmarkEntry(
+            runtime="Decompiled C99 (Native C Loop)",
+            p50_us=0.0,
+            p95_us=0.0,
+            p99_us=0.0,
+            throughput_ips=0.0,
+            measured_throughput_ips=0.0,
+            batch_size=1,
+            native_loop_p50_ns=None,
+            artifact_bytes=c_bytes,
+            source_bytes=c_bytes,
+            binary_bytes=0,
+            compiler=compiler,
+            speedup_vs_onnx=0.0,
+            max_diff_vs_ref=0.0,
+            available=False,
+            note=note,
+        ),
+    ]
+
+
+def _benchmark_c99_targets(
+    program: DecompiledProgram,
+    emitted_code: dict[str, str],
+    X_test: np.ndarray,
+    ref_prog: np.ndarray,
+    onnx_b1_p50: float,
+    work_dir: Path | None,
+    n_warmup: int,
+    n_iters: int,
+) -> list[BenchmarkEntry]:
+    c_src = emitted_code.get("c", "")
+    h_src = emitted_code.get("h", "")
+    c_bytes = len(c_src.encode("utf-8"))
+    if not c_src.strip():
+        return _unavailable_c_entries(0, "missing emitted C99 code")
+
+    compiler_info = find_c_compiler()
+    if compiler_info is None:
+        return _unavailable_c_entries(c_bytes, "no C99 compiler found (gcc/clang/ziglang)")
 
     if work_dir is not None:
         Path(work_dir).mkdir(parents=True, exist_ok=True)
 
-    ext = ".dll" if sys.platform == "win32" else ".so"
     with tempfile.TemporaryDirectory(dir=work_dir, ignore_cleanup_errors=True) as tmp:
         tmp_path = Path(tmp)
-        c_path = tmp_path / "glassbox_model.c"
-        dll_path = tmp_path / f"glassbox_model{ext}"
-        c_path.write_text(c_src, encoding="utf-8")
-
-        if h_src.strip():
-            # Ensure any local `#include "header.h"` directive resolves in the build dir.
-            inc_match = re.search(r'#include\s+"([^"]+)"', c_src)
-            if inc_match:
-                (tmp_path / Path(inc_match.group(1)).name).write_text(h_src, encoding="utf-8")
-            (tmp_path / "glassbox_model.h").write_text(h_src, encoding="utf-8")
-
-        cmd = [
-            sys.executable,
-            "-m",
-            "ziglang",
-            "cc",
-            "-O3",
-            "-shared",
-            "-std=c99",
-            str(c_path),
-            "-o",
-            str(dll_path),
-            "-lm",
-        ]
-        if sys.platform != "win32":
-            cmd.append("-fPIC")
-
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
-        except (OSError, subprocess.SubprocessError) as exc:
-            return BenchmarkEntry(
-                runtime="Decompiled C99 (Native DLL)",
-                p50_us=0.0,
-                p95_us=0.0,
-                p99_us=0.0,
-                throughput_ips=0.0,
-                artifact_bytes=c_bytes,
-                speedup_vs_onnx=0.0,
-                max_diff_vs_ref=0.0,
-                available=False,
-                note=f"C compiler unavailable: {exc}",
+            dll_path, cc_name = compile_c_shared(
+                c_src,
+                tmp_path / "glassbox_model",
+                h_source=h_src,
+                strict_warnings=True,
             )
+        except (RuntimeError, OSError) as exc:
+            return _unavailable_c_entries(c_bytes, f"C99 compile failed: {exc}", compiler_info[1])
 
-        if proc.returncode != 0 or not dll_path.exists():
-            err_msg = (proc.stderr or proc.stdout).strip()[:200]
-            return BenchmarkEntry(
-                runtime="Decompiled C99 (Native DLL)",
-                p50_us=0.0,
-                p95_us=0.0,
-                p99_us=0.0,
-                throughput_ips=0.0,
-                artifact_bytes=c_bytes,
-                speedup_vs_onnx=0.0,
-                max_diff_vs_ref=0.0,
-                available=False,
-                note=f"C99 compile failed: {err_msg}",
-            )
-
-        dll_bytes = dll_path.stat().st_size
+        dll_bytes = int(dll_path.stat().st_size)
         lib = ctypes.CDLL(str(dll_path))
         try:
             infer_c = lib.glassbox_infer
@@ -346,6 +419,7 @@ def _benchmark_c99(
 
             in_dim = program.domain.input_dim
             out_dim = program.domain.output_dim
+            n_samples = len(X_test)
             c_inputs = [(ctypes.c_double * in_dim)(*row.tolist()) for row in X_test]
             out_buf = (ctypes.c_double * out_dim)()
             reg_buf = ctypes.c_int()
@@ -355,15 +429,113 @@ def _benchmark_c99(
                 infer_c(x_buf, out_buf, ctypes.byref(reg_buf))
                 y_rows.append([out_buf[j] for j in range(out_dim)])
             Y_c = np.asarray(y_rows, dtype=np.float64)
-            max_diff = float(np.max(np.abs(Y_c - ref_prog)))
+            max_diff_ffi = float(np.max(np.abs(Y_c - ref_prog)))
 
             reg_ptr = ctypes.byref(reg_buf)
-            latencies = _time_single_calls(
+            ffi_p50, ffi_p95, ffi_p99, ffi_ips = _measure_calls(
                 lambda idx: infer_c(c_inputs[idx], out_buf, reg_ptr),
                 len(c_inputs),
                 n_warmup,
                 n_iters,
+                batch_size=1,
             )
+
+            ffi_entry = BenchmarkEntry(
+                runtime="Decompiled C99 (ctypes FFI)",
+                p50_us=ffi_p50,
+                p95_us=ffi_p95,
+                p99_us=ffi_p99,
+                throughput_ips=ffi_ips,
+                measured_throughput_ips=ffi_ips,
+                batch_size=1,
+                artifact_bytes=dll_bytes,
+                source_bytes=c_bytes,
+                binary_bytes=dll_bytes,
+                compiler=cc_name,
+                speedup_vs_onnx=onnx_b1_p50 / max(ffi_p50, 1e-6),
+                max_diff_vs_ref=max_diff_ffi,
+                available=True,
+                note=f"{cc_name} -O3 -std=c99 single-call via Python ctypes FFI",
+            )
+
+            bench_loop = getattr(lib, "glassbox_bench_loop", None)
+            if bench_loop is None:
+                native_entry = BenchmarkEntry(
+                    runtime="Decompiled C99 (Native C Loop)",
+                    p50_us=0.0,
+                    p95_us=0.0,
+                    p99_us=0.0,
+                    throughput_ips=0.0,
+                    measured_throughput_ips=0.0,
+                    batch_size=1,
+                    native_loop_p50_ns=None,
+                    artifact_bytes=dll_bytes,
+                    source_bytes=c_bytes,
+                    binary_bytes=dll_bytes,
+                    compiler=cc_name,
+                    speedup_vs_onnx=0.0,
+                    max_diff_vs_ref=max_diff_ffi,
+                    available=False,
+                    note="glassbox_bench_loop symbol missing",
+                )
+            else:
+                bench_loop.argtypes = [
+                    ctypes.POINTER(ctypes.c_double),
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.POINTER(ctypes.c_double),
+                ]
+                bench_loop.restype = ctypes.c_double
+
+                flat_vals = X_test.reshape(-1).tolist()
+                xs_flat = (ctypes.c_double * len(flat_vals))(*flat_vals)
+                out_last = (ctypes.c_double * out_dim)()
+                n_repeats = max(50, (max(200, n_iters) * 5) // n_samples)
+                calls_per_run = n_samples * n_repeats
+
+                for _ in range(3):
+                    bench_loop(xs_flat, n_samples, n_repeats, out_last)
+
+                last_vals = np.asarray([out_last[j] for j in range(out_dim)], dtype=np.float64)
+                last_diff = float(np.max(np.abs(last_vals - ref_prog[-1])))
+                max_diff_native = max(max_diff_ffi, last_diff)
+
+                ns_per_call_runs: list[float] = []
+                total_ns = 0
+                total_calls = 0
+                for _ in range(25):
+                    t0 = time.perf_counter_ns()
+                    bench_loop(xs_flat, n_samples, n_repeats, out_last)
+                    t1 = time.perf_counter_ns()
+                    elapsed_ns = max(1, t1 - t0)
+                    ns_per_call_runs.append(elapsed_ns / calls_per_run)
+                    total_ns += elapsed_ns
+                    total_calls += calls_per_run
+
+                p50_ns, p95_ns, p99_ns = _percentiles(ns_per_call_runs)
+                p50_us = p50_ns / 1000.0
+                p95_us = p95_ns / 1000.0
+                p99_us = p99_ns / 1000.0
+                native_ips = float(total_calls / max(total_ns / 1e9, 1e-9))
+
+                native_entry = BenchmarkEntry(
+                    runtime="Decompiled C99 (Native C Loop)",
+                    p50_us=p50_us,
+                    p95_us=p95_us,
+                    p99_us=p99_us,
+                    throughput_ips=native_ips,
+                    measured_throughput_ips=native_ips,
+                    batch_size=1,
+                    native_loop_p50_ns=p50_ns,
+                    artifact_bytes=dll_bytes,
+                    source_bytes=c_bytes,
+                    binary_bytes=dll_bytes,
+                    compiler=cc_name,
+                    speedup_vs_onnx=onnx_b1_p50 / max(p50_us, 1e-6),
+                    max_diff_vs_ref=max_diff_native,
+                    available=True,
+                    note=f"{cc_name} -O3 -std=c99 in-C tight loop ({p50_ns:.1f} ns/call, 0 FFI)",
+                )
         finally:
             if sys.platform == "win32":
                 try:
@@ -371,19 +543,7 @@ def _benchmark_c99(
                 except OSError:
                     pass
 
-    p50, p95, p99, throughput = _summarize_latencies(latencies)
-    return BenchmarkEntry(
-        runtime="Decompiled C99 (Native DLL)",
-        p50_us=p50,
-        p95_us=p95,
-        p99_us=p99,
-        throughput_ips=throughput,
-        artifact_bytes=int(dll_bytes),
-        speedup_vs_onnx=onnx_p50 / max(p50, 1e-6),
-        max_diff_vs_ref=max_diff,
-        available=True,
-        note="ziglang cc -O3 -std=c99 ctypes single-call vs program.predict",
-    )
+    return [ffi_entry, native_entry]
 
 
 def run_benchmarks(
@@ -394,7 +554,7 @@ def run_benchmarks(
     n_warmup: int = 100,
     n_iters: int = 2000,
 ) -> list[BenchmarkEntry]:
-    """Benchmark ONNX Runtime, PyTorch, decompiled Python, and native C99 DLL."""
+    """Benchmark ONNX (batch=1, batch=64), PyTorch, Python, C99 ctypes FFI, and C99 native loop."""
     rng = np.random.default_rng(12345)
     low = np.asarray(program.domain.lower_bounds, dtype=np.float64)
     high = np.asarray(program.domain.upper_bounds, dtype=np.float64)
@@ -403,22 +563,25 @@ def run_benchmarks(
     ref_nn = model.predict(X_test)
     ref_prog = program.predict(X_test)
 
-    onnx_entry = _benchmark_onnx(model, X_test, ref_nn, n_warmup, n_iters)
-    onnx_p50 = max(onnx_entry.p50_us, 1e-6)
+    onnx_b1 = _benchmark_onnx_batch1(model, X_test, ref_nn, n_warmup, n_iters)
+    onnx_b1_p50 = max(onnx_b1.p50_us, 1e-6)
 
-    pytorch_entry = _benchmark_pytorch(model, X_test, ref_nn, onnx_p50, n_warmup, n_iters)
-    python_entry = _benchmark_python(emitted_code, X_test, ref_prog, onnx_p50, n_warmup, n_iters)
-    c99_entry = _benchmark_c99(
+    onnx_b64 = _benchmark_onnx_batch64(model, X_test, ref_nn, onnx_b1_p50, n_warmup, n_iters)
+    pytorch_b1 = _benchmark_pytorch(model, X_test, ref_nn, onnx_b1_p50, n_warmup, n_iters)
+    python_entry = _benchmark_python(
+        emitted_code, X_test, ref_prog, onnx_b1_p50, n_warmup, n_iters
+    )
+    c99_entries = _benchmark_c99_targets(
         program,
         emitted_code,
         X_test,
         ref_prog,
-        onnx_p50,
+        onnx_b1_p50,
         work_dir,
         n_warmup,
         n_iters,
     )
-    return [onnx_entry, pytorch_entry, python_entry, c99_entry]
+    return [onnx_b1, onnx_b64, pytorch_b1, python_entry, *c99_entries]
 
 
 __all__ = ["run_benchmarks"]

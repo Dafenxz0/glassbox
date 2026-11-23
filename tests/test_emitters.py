@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import ctypes
+import math
 import re
 import subprocess
 import sys
@@ -13,12 +14,15 @@ import numpy as np
 import pytest
 
 from glassbox.emitters import (
+    compile_c_executable,
+    compile_c_shared,
     emit_all,
     emit_c,
     emit_ir_json,
     emit_mermaid,
     emit_python,
     emit_rust,
+    find_c_compiler,
     generate_golden_vectors,
 )
 from glassbox.emitters.ir_emitter import sanitize_identifiers
@@ -34,6 +38,9 @@ from glassbox.ir import (
     VarExpr,
 )
 from glassbox.types import DomainSpec, TaskType
+
+if sys.platform == "win32":
+    import _ctypes
 
 
 def _make_rich_program(task_type: TaskType = TaskType.REGRESSION) -> DecompiledProgram:
@@ -174,20 +181,12 @@ def _make_nonlinear_program() -> DecompiledProgram:
     )
 
 
-def _compile_with_zig(args: list[str]) -> subprocess.CompletedProcess[str]:
-    cmd = [
-        sys.executable,
-        "-m",
-        "ziglang",
-        "cc",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-        "-std=c99",
-        "-O3",
-        *args,
-    ]
-    return subprocess.run(cmd, capture_output=True, text=True, check=True)
+def test_find_c_compiler_available() -> None:
+    found = find_c_compiler()
+    assert found is not None
+    cmd, name = found
+    assert isinstance(cmd, list) and len(cmd) >= 1
+    assert name in {"gcc", "clang", "ziglang cc"}
 
 
 @pytest.mark.parametrize(
@@ -200,27 +199,35 @@ def _compile_with_zig(args: list[str]) -> subprocess.CompletedProcess[str]:
     ],
 )
 def test_c_emitter_compile_dll_and_main(tmp_path: Path, program: DecompiledProgram) -> None:
+    if find_c_compiler() is None:
+        pytest.skip("No C99 compiler available on this host")
+
     c_src, h_src = emit_c(program)
     assert "#include <math.h>" in c_src
     assert "#include <stddef.h>" in c_src
     assert "#ifdef GLASSBOX_MAIN" in c_src
     assert "GLASSBOX_API int glassbox_infer(" in h_src
     assert "GLASSBOX_API GlassBoxOutput glassbox_infer_struct(" in h_src
-
-    c_path = tmp_path / "model.c"
-    h_path = tmp_path / "model.h"
-    dll_path = tmp_path / "model.dll"
-    exe_path = tmp_path / "model_main.exe"
-    c_path.write_text(c_src, encoding="utf-8")
-    h_path.write_text(h_src, encoding="utf-8")
+    assert "GLASSBOX_API double glassbox_bench_loop(" in h_src
 
     # Compile standalone GLASSBOX_MAIN binary with strict zero-warning flags
-    _compile_with_zig(["-DGLASSBOX_MAIN", str(c_path), "-lm", "-o", str(exe_path)])
+    exe_path, cc_name = compile_c_executable(
+        c_src,
+        tmp_path / "model_main",
+        h_source=h_src,
+        strict_warnings=True,
+    )
+    assert cc_name in {"gcc", "clang", "ziglang cc"}
     main_run = subprocess.run([str(exe_path)], capture_output=True, text=True, check=True)
     assert "PASS:" in main_run.stdout
 
-    # Compile shared DLL with strict zero-warning flags
-    _compile_with_zig(["-shared", str(c_path), "-lm", "-o", str(dll_path)])
+    # Compile shared library (.dll / .so) with strict zero-warning flags
+    dll_path, _ = compile_c_shared(
+        c_src,
+        tmp_path / "model",
+        h_source=h_src,
+        strict_warnings=True,
+    )
 
     feat_names = sanitize_identifiers(program.domain.feature_names, prefix="x")
     out_names = sanitize_identifiers(program.domain.output_names, prefix="y")
@@ -236,47 +243,71 @@ def test_c_emitter_compile_dll_and_main(tmp_path: Path, program: DecompiledProgr
         ]
 
     lib = ctypes.CDLL(str(dll_path))
-    lib.glassbox_infer.argtypes = [
-        ctypes.POINTER(ctypes.c_double),
-        ctypes.POINTER(ctypes.c_double),
-        ctypes.POINTER(ctypes.c_int),
-    ]
-    lib.glassbox_infer.restype = ctypes.c_int
-    lib.glassbox_infer_struct.argtypes = [ctypes.POINTER(CInput)]
-    lib.glassbox_infer_struct.restype = COutput
+    try:
+        lib.glassbox_infer.argtypes = [
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        lib.glassbox_infer.restype = ctypes.c_int
+        lib.glassbox_infer_struct.argtypes = [ctypes.POINTER(CInput)]
+        lib.glassbox_infer_struct.restype = COutput
+        lib.glassbox_bench_loop.argtypes = [
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_double),
+        ]
+        lib.glassbox_bench_loop.restype = ctypes.c_double
 
-    rng = np.random.default_rng(7)
-    lows = np.array(program.domain.lower_bounds, dtype=np.float64)
-    highs = np.array(program.domain.upper_bounds, dtype=np.float64)
-    X = rng.uniform(lows, highs, size=(32, program.domain.input_dim))
-    ref_preds, ref_regimes = program.predict_with_regimes(X)
-    ref_classes = (
-        program.predict_classes(X)
-        if program.task_type == TaskType.CLASSIFICATION
-        else None
-    )
+        rng = np.random.default_rng(7)
+        lows = np.array(program.domain.lower_bounds, dtype=np.float64)
+        highs = np.array(program.domain.upper_bounds, dtype=np.float64)
+        X = rng.uniform(lows, highs, size=(32, program.domain.input_dim))
+        ref_preds, ref_regimes = program.predict_with_regimes(X)
+        ref_classes = (
+            program.predict_classes(X)
+            if program.task_type == TaskType.CLASSIFICATION
+            else None
+        )
 
-    in_dim = program.domain.input_dim
-    out_dim = program.domain.output_dim
-    for idx, row in enumerate(X):
-        x_buf = (ctypes.c_double * in_dim)(*[float(v) for v in row])
-        y_buf = (ctypes.c_double * out_dim)()
-        reg = ctypes.c_int(-1)
-        rc = lib.glassbox_infer(x_buf, y_buf, ctypes.byref(reg))
-        assert rc == 0
-        assert reg.value == int(ref_regimes[idx])
-        c_vals = [float(y_buf[j]) for j in range(out_dim)]
-        assert np.max(np.abs(np.array(c_vals) - ref_preds[idx])) < 1e-9
+        in_dim = program.domain.input_dim
+        out_dim = program.domain.output_dim
+        for idx, row in enumerate(X):
+            x_buf = (ctypes.c_double * in_dim)(*[float(v) for v in row])
+            y_buf = (ctypes.c_double * out_dim)()
+            reg = ctypes.c_int(-1)
+            rc = lib.glassbox_infer(x_buf, y_buf, ctypes.byref(reg))
+            assert rc == 0
+            assert reg.value == int(ref_regimes[idx])
+            c_vals = [float(y_buf[j]) for j in range(out_dim)]
+            assert np.max(np.abs(np.array(c_vals) - ref_preds[idx])) < 1e-9
 
-        s_in = CInput(*[float(v) for v in row])
-        s_out = lib.glassbox_infer_struct(ctypes.byref(s_in))
-        assert s_out.regime_id == int(ref_regimes[idx])
-        s_vals = [float(getattr(s_out, oname)) for oname in out_names]
-        assert np.max(np.abs(np.array(s_vals) - ref_preds[idx])) < 1e-9
-        if ref_classes is not None:
-            assert s_out.class_id == int(ref_classes[idx])
-        else:
-            assert s_out.class_id == -1
+            s_in = CInput(*[float(v) for v in row])
+            s_out = lib.glassbox_infer_struct(ctypes.byref(s_in))
+            assert s_out.regime_id == int(ref_regimes[idx])
+            s_vals = [float(getattr(s_out, oname)) for oname in out_names]
+            assert np.max(np.abs(np.array(s_vals) - ref_preds[idx])) < 1e-9
+            if ref_classes is not None:
+                assert s_out.class_id == int(ref_classes[idx])
+            else:
+                assert s_out.class_id == -1
+
+        # Verify pure-C batch loop helper `glassbox_bench_loop`
+        flat_x = [float(v) for row in X for v in row]
+        xs_buf = (ctypes.c_double * len(flat_x))(*flat_x)
+        last_buf = (ctypes.c_double * out_dim)()
+        acc = float(lib.glassbox_bench_loop(xs_buf, len(X), 4, last_buf))
+        assert math.isfinite(acc)
+        last_vals = [float(last_buf[j]) for j in range(out_dim)]
+        assert np.max(np.abs(np.array(last_vals) - ref_preds[-1])) < 1e-9
+        assert float(lib.glassbox_bench_loop(xs_buf, 0, 4, last_buf)) == 0.0
+    finally:
+        if sys.platform == "win32":
+            try:
+                _ctypes.FreeLibrary(lib._handle)
+            except OSError:
+                pass
 
 
 @pytest.mark.parametrize(

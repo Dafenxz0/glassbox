@@ -14,8 +14,10 @@ from pydantic import BaseModel, Field, model_validator
 from glassbox.types import (
     BenchmarkEntry,
     Counterexample,
+    DecisionExplanation,
     DomainSpec,
     ModelMetadata,
+    ParetoCandidate,
     TaskType,
     VerificationCertificate,
 )
@@ -296,6 +298,27 @@ class DecompiledProgram(BaseModel):
             node = node.true_branch if node.guard.evaluate(x) else node.false_branch
         return node
 
+    def trace_one(
+        self, x: Sequence[float]
+    ) -> tuple[list[float], RegimeLeaf, list[dict[str, Any]]]:
+        """Trace decision-tree routing and evaluate output expressions for a single input."""
+        node = self.root
+        guard_trace: list[dict[str, Any]] = []
+        while isinstance(node, GuardNode):
+            margin = node.guard.margin(x)
+            satisfied = node.guard.evaluate(x)
+            guard_trace.append(
+                {
+                    "expression": node.guard.to_readable(),
+                    "margin": margin,
+                    "satisfied": satisfied,
+                    "branch": "true" if satisfied else "false",
+                }
+            )
+            node = node.true_branch if satisfied else node.false_branch
+        outputs = [eval_expr(expr, x) for expr in node.output_exprs]
+        return outputs, node, guard_trace
+
     def evaluate_one(self, x: Sequence[float]) -> tuple[list[float], int]:
         """Evaluate the program on a single input, returning (outputs, regime_id)."""
         leaf = self._route_leaf(x)
@@ -413,6 +436,9 @@ class DecompileResult(BaseModel):
     counterexamples: list[Counterexample] = Field(default_factory=list)
     code: dict[str, str] = Field(default_factory=dict)
     benchmarks: list[BenchmarkEntry] = Field(default_factory=list)
+    pareto_frontier: list[ParetoCandidate] = Field(default_factory=list)
+    regime_neuron_profiles: dict[int, dict[str, Any]] = Field(default_factory=dict)
+    sample_explanations: list[DecisionExplanation] = Field(default_factory=list)
 
 
 __all__ = [

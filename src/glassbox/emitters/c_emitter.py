@@ -1,8 +1,14 @@
-"""Zero-dependency C99 code emitter for DecompiledProgram."""
+"""Zero-dependency C99 code emitter and native compiler helpers for DecompiledProgram."""
 
 from __future__ import annotations
 
+import importlib.util
 import re
+import shutil
+import subprocess
+import sys
+from collections.abc import Sequence
+from pathlib import Path
 
 from glassbox.ir import DecompiledProgram, RegimeLeaf, RegimeNode
 from glassbox.types import TaskType
@@ -27,6 +33,115 @@ _C_DIALECT = ExprDialect(
     max_fn="fmax",
     clamp_fn="GB_CLAMP",
 )
+
+
+def find_c_compiler() -> tuple[list[str], str] | None:
+    """Locate an available C99 compiler toolchain (`gcc`, `clang`, or `ziglang cc`)."""
+    gcc = shutil.which("gcc")
+    if gcc:
+        return ([gcc], "gcc")
+    clang = shutil.which("clang")
+    if clang:
+        return ([clang], "clang")
+    if importlib.util.find_spec("ziglang") is not None:
+        return ([sys.executable, "-m", "ziglang", "cc"], "ziglang cc")
+    return None
+
+
+def _write_companion_headers(build_dir: Path, stem: str, c_source: str, h_source: str | None) -> None:
+    if not h_source or not h_source.strip():
+        return
+    (build_dir / f"{stem}.h").write_text(h_source, encoding="utf-8")
+    (build_dir / "glassbox_model.h").write_text(h_source, encoding="utf-8")
+    inc_match = re.search(r'#include\s+"([^"]+)"', c_source)
+    if inc_match:
+        (build_dir / Path(inc_match.group(1)).name).write_text(h_source, encoding="utf-8")
+
+
+def compile_c_shared(
+    c_source: str,
+    out_path: Path | str,
+    h_source: str | None = None,
+    *,
+    strict_warnings: bool = True,
+    extra_flags: Sequence[str] = (),
+) -> tuple[Path, str]:
+    """Compile emitted C99 source into a native shared library (.dll / .so)."""
+    compiler = find_c_compiler()
+    if compiler is None:
+        raise RuntimeError("No C99 compiler available (checked gcc, clang, ziglang)")
+    cc_cmd, cc_name = compiler
+
+    ext = ".dll" if sys.platform == "win32" else ".so"
+    target = Path(out_path)
+    if target.exists() and target.is_dir():
+        lib_path = target / f"glassbox_model{ext}"
+    elif target.suffix not in {".dll", ".so", ".dylib"}:
+        lib_path = target.with_suffix(ext)
+    else:
+        lib_path = target
+
+    lib_path.parent.mkdir(parents=True, exist_ok=True)
+    c_path = lib_path.with_suffix(".c")
+    c_path.write_text(c_source, encoding="utf-8")
+    _write_companion_headers(lib_path.parent, lib_path.stem, c_source, h_source)
+
+    cmd = [*cc_cmd, "-std=c99", "-O3"]
+    if strict_warnings:
+        cmd.extend(["-Wall", "-Wextra", "-Werror"])
+    cmd.append("-shared")
+    if sys.platform != "win32":
+        cmd.append("-fPIC")
+    cmd.extend([*extra_flags, str(c_path), "-o", str(lib_path), "-lm"])
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+    if proc.returncode != 0 or not lib_path.exists():
+        err_msg = (proc.stderr or proc.stdout).strip()[:400]
+        raise RuntimeError(f"C99 shared compile failed ({cc_name}): {err_msg}")
+    return lib_path, cc_name
+
+
+def compile_c_executable(
+    c_source: str,
+    out_path: Path | str,
+    h_source: str | None = None,
+    *,
+    define_main: bool = True,
+    strict_warnings: bool = True,
+    extra_flags: Sequence[str] = (),
+) -> tuple[Path, str]:
+    """Compile emitted C99 source into a standalone executable (with `-DGLASSBOX_MAIN`)."""
+    compiler = find_c_compiler()
+    if compiler is None:
+        raise RuntimeError("No C99 compiler available (checked gcc, clang, ziglang)")
+    cc_cmd, cc_name = compiler
+
+    ext = ".exe" if sys.platform == "win32" else ""
+    target = Path(out_path)
+    if target.exists() and target.is_dir():
+        exe_path = target / f"glassbox_main{ext}"
+    elif sys.platform == "win32" and target.suffix.lower() != ".exe":
+        exe_path = target.with_suffix(".exe")
+    else:
+        exe_path = target
+
+    exe_path.parent.mkdir(parents=True, exist_ok=True)
+    c_path = exe_path.parent / f"{exe_path.stem}_main.c"
+    c_path.write_text(c_source, encoding="utf-8")
+    _write_companion_headers(exe_path.parent, exe_path.stem, c_source, h_source)
+
+    cmd = [*cc_cmd, "-std=c99", "-O3"]
+    if strict_warnings:
+        cmd.extend(["-Wall", "-Wextra", "-Werror"])
+    if define_main:
+        cmd.append("-DGLASSBOX_MAIN")
+    cmd.extend([*extra_flags, str(c_path), "-o", str(exe_path), "-lm"])
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+    if proc.returncode != 0 or not exe_path.exists():
+        err_msg = (proc.stderr or proc.stdout).strip()[:400]
+        raise RuntimeError(f"C99 executable compile failed ({cc_name}): {err_msg}")
+    return exe_path, cc_name
 
 
 def _safe_comment(text: str) -> str:
@@ -72,6 +187,7 @@ def _shared_header_decls(
         "",
         "GLASSBOX_API int glassbox_infer(const double* x, double* out_values, int* out_regime);",
         "GLASSBOX_API GlassBoxOutput glassbox_infer_struct(const GlassBoxInput* in);",
+        "GLASSBOX_API double glassbox_bench_loop(const double* xs, int n_samples, int n_repeats, double* out_last);",
     ])
     return lines
 
@@ -256,6 +372,33 @@ def emit_c(
         "    return result;",
         "}",
         "",
+        "GLASSBOX_API double glassbox_bench_loop(",
+        "    const double* xs,",
+        "    int n_samples,",
+        "    int n_repeats,",
+        "    double* out_last",
+        ") {",
+        "    if (xs == NULL || n_samples <= 0 || n_repeats <= 0) {",
+        "        return 0.0;",
+        "    }",
+        "    double local_out[GLASSBOX_OUTPUT_DIM] = {0};",
+        "    int local_regime = 0;",
+        "    volatile double acc = 0.0;",
+        "    for (int r = 0; r < n_repeats; ++r) {",
+        "        for (int i = 0; i < n_samples; ++i) {",
+        "            const double* row = xs + (size_t)i * GLASSBOX_INPUT_DIM;",
+        "            glassbox_eval_core(row, local_out, &local_regime, NULL);",
+        "            acc = acc + local_out[0] + (double)local_regime * 1e-12;",
+        "        }",
+        "    }",
+        "    if (out_last != NULL) {",
+        "        for (int j = 0; j < GLASSBOX_OUTPUT_DIM; ++j) {",
+        "            out_last[j] = local_out[j];",
+        "        }",
+        "    }",
+        "    return acc;",
+        "}",
+        "",
         "#ifdef GLASSBOX_MAIN",
         "int main(void) {",
     ])
@@ -321,6 +464,14 @@ def emit_c(
             ])
         c_lines.extend([
             "    }",
+            f"    double bench_last[{out_dim}] = {{0}};",
+            f"    (void)glassbox_bench_loop(&gv_x[0][0], {n_vec}, 2, bench_last);",
+            f"    for (int j = 0; j < {out_dim}; ++j) {{",
+            f"        if (fabs(bench_last[j] - gv_y[{n_vec - 1}][j]) > 1e-9) {{",
+            '            fprintf(stderr, "FAIL bench_loop out[%d]\\n", j);',
+            "            return 1;",
+            "        }",
+            "    }",
             f'    printf("PASS: %d/%d golden vectors verified.\\n", {n_vec}, {n_vec});',
             "    return 0;",
         ])
@@ -334,4 +485,9 @@ def emit_c(
     return "\n".join(c_lines), "\n".join(h_lines)
 
 
-__all__ = ["emit_c"]
+__all__ = [
+    "compile_c_executable",
+    "compile_c_shared",
+    "emit_c",
+    "find_c_compiler",
+]

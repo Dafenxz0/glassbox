@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from glassbox.ir import DecompiledProgram
 
-from .c_emitter import emit_c
+from .c_emitter import (
+    compile_c_executable,
+    compile_c_shared,
+    emit_c,
+    find_c_compiler,
+)
 from .ir_emitter import (
     emit_ir_json,
     emit_mermaid,
@@ -37,11 +42,14 @@ def emit_all(
 
 
 __all__ = [
+    "compile_c_executable",
+    "compile_c_shared",
     "emit_all",
     "emit_c",
     "emit_ir_json",
     "emit_mermaid",
     "emit_python",
     "emit_rust",
+    "find_c_compiler",
     "generate_golden_vectors",
 ]

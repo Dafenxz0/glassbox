@@ -23,11 +23,18 @@ from glassbox.ir import (
     is_expr_linear,
 )
 from glassbox.types import (
+    ArtifactManifest,
+    BenchmarkEntry,
+    BundleVerificationReport,
     CEGISIteration,
+    DecisionExplanation,
     DecompileConfig,
     DomainSpec,
     LayerInfo,
     ModelMetadata,
+    NumericalDeploymentAssurance,
+    ParetoCandidate,
+    RealArithmeticProof,
     TaskType,
     VerificationCertificate,
     VerificationStatus,
@@ -57,7 +64,11 @@ def _sample_program(task_type: TaskType = TaskType.REGRESSION) -> DecompiledProg
         output_exprs=[
             BinaryExpr(
                 op="add",
-                left=BinaryExpr(op="mul", left=ConstExpr(value=2.0), right=VarExpr(index=0, name="x0")),
+                left=BinaryExpr(
+                    op="mul",
+                    left=ConstExpr(value=2.0),
+                    right=VarExpr(index=0, name="x0"),
+                ),
                 right=ConstExpr(value=1.0),
             ),
             ClampExpr(operand=VarExpr(index=1, name="x1"), low=0.0, high=2.0),
@@ -93,7 +104,11 @@ def _sample_program(task_type: TaskType = TaskType.REGRESSION) -> DecompiledProg
             BinaryExpr(
                 op="max",
                 left=UnaryExpr(op="neg", operand=VarExpr(index=0, name="x0")),
-                right=BinaryExpr(op="div", left=VarExpr(index=1, name="x1"), right=ConstExpr(value=2.0)),
+                right=BinaryExpr(
+                    op="div",
+                    left=VarExpr(index=1, name="x1"),
+                    right=ConstExpr(value=2.0),
+                ),
             ),
         ],
         class_id=None,
@@ -269,12 +284,23 @@ def test_is_expr_linear_and_program_linearity() -> None:
     assert nonlinear_prog.is_piecewise_linear() is False
 
 
-def test_program_evaluation_metrics_and_classes() -> None:
+def test_program_evaluation_metrics_trace_and_classes() -> None:
     prog = _sample_program(TaskType.CLASSIFICATION)
 
     out0, rid0 = prog.evaluate_one([-1.0, 0.5])
     assert rid0 == 0
     assert out0 == pytest.approx([-1.0, 0.5])
+
+    t_out, t_leaf, t_trace = prog.trace_one([-1.0, 0.5])
+    assert t_out == pytest.approx([-1.0, 0.5])
+    assert t_leaf.regime_id == 0
+    assert len(t_trace) == 2
+    assert t_trace[0]["satisfied"] is True
+    assert t_trace[0]["branch"] == "true"
+    assert t_trace[0]["margin"] == pytest.approx(-1.0)
+    assert t_trace[1]["satisfied"] is True
+    assert t_trace[1]["branch"] == "true"
+    assert t_trace[1]["margin"] == pytest.approx(-0.5)
 
     out1, rid1 = prog.evaluate_one([0.0, 1.0])
     assert rid1 == 1
@@ -294,10 +320,8 @@ def test_program_evaluation_metrics_and_classes() -> None:
     assert list(regimes) == [0, 1, 2]
 
     classes = prog.predict_classes(X)
-    # leaf0 class_id=0, leaf1 class_id=1, leaf2 class_id=None -> argmax([1.0, 1.0]) == 0
     assert list(classes) == [0, 1, 0]
 
-    # Empty batch
     empty_preds, empty_regimes = prog.predict_with_regimes(np.empty((0, 2)))
     assert empty_preds.shape == (0, 2)
     assert empty_regimes.shape == (0,)
@@ -309,11 +333,6 @@ def test_program_evaluation_metrics_and_classes() -> None:
     assert [leaf.regime_id for leaf in prog.leaves()] == [0, 1, 2]
     assert prog.max_depth() == 2
     assert prog.cyclomatic_complexity() == 3
-    # 2 guard nodes + 3 leaf nodes + expr nodes:
-    # leaf0: mul(3) + add(+2=5) + clamp(2) => 7 expr nodes
-    # leaf1: relu(2) + abs(2) => 4 expr nodes
-    # leaf2: min(3) + neg(2) + div(3) + max(+1=6) => 9 expr nodes
-    # total = 5 tree nodes + 20 expr nodes = 25
     assert prog.ast_node_count() == 25
 
 
@@ -332,8 +351,16 @@ def test_serialization_and_sha256_determinism() -> None:
     assert modified.sha256() != prog1.sha256()
 
 
-def test_decompile_result_exports_and_roundtrip() -> None:
+def test_v020_contracts_and_decompile_result_roundtrip() -> None:
     assert DecompileResult is TypesDecompileResult
+    assert VerificationStatus.PROVEN_REAL_GLOBAL.is_proven is True
+    assert VerificationStatus.PROVEN_REAL_MARGIN.is_proven is True
+    assert VerificationStatus.PROVEN_SMT.is_proven is True
+    assert VerificationStatus.BOUNDED_EMPIRICAL.is_proven is False
+    assert VerificationStatus.TIMEOUT.is_proven is False
+    assert VerificationStatus.UNKNOWN.is_proven is False
+    assert VerificationStatus.COUNTEREXAMPLE_FOUND.is_proven is False
+    assert VerificationStatus.UNVERIFIED.is_proven is False
 
     prog = _sample_program(TaskType.REGRESSION)
     dom = prog.domain
@@ -359,12 +386,47 @@ def test_decompile_result_exports_and_roundtrip() -> None:
         ],
         domain=dom,
     )
+    proof = RealArithmeticProof(
+        scope="global",
+        z3_version="4.13.0",
+        solver_result="unsat",
+        leaves_proven=3,
+        leaves_total=3,
+        leaf_proven_map={0: True, 1: True, 2: True},
+        solve_time_ms=12.4,
+    )
+    assurance = NumericalDeploymentAssurance(
+        onnxruntime_samples_checked=2000,
+        ir_vs_onnx_max_diff=1e-6,
+        ir_vs_onnx_agreement=1.0,
+        c99_compiled=True,
+        c99_compiler="zig cc",
+        c99_vs_ir_max_diff=0.0,
+        python_vs_ir_max_diff=0.0,
+    )
+    bench = BenchmarkEntry(
+        runtime="c99_dll",
+        p50_us=0.5,
+        p95_us=0.8,
+        p99_us=1.2,
+        throughput_ips=2_000_000.0,
+        artifact_bytes=16384,
+        speedup_vs_onnx=14.0,
+        max_diff_vs_ref=0.0,
+        measured_throughput_ips=1_950_000.0,
+        batch_size=1,
+        native_loop_p50_ns=12.5,
+        source_bytes=1200,
+        binary_bytes=16384,
+        compiler="zig cc",
+    )
+    cfg = DecompileConfig()
     cert = VerificationCertificate(
         created_at="2026-11-23T00:00:00Z",
         model_name="mlp_test",
         model_sha256="abc123",
         program_sha256=prog.sha256(),
-        status=VerificationStatus.PROVEN_SMT,
+        status=VerificationStatus.PROVEN_REAL_GLOBAL,
         tolerance_eps=0.05,
         classification_margin=0.05,
         domain=dom,
@@ -384,20 +446,77 @@ def test_decompile_result_exports_and_roundtrip() -> None:
                 rmse=0.006,
                 regime_count=3,
                 ast_nodes=prog.ast_node_count(),
-                status=VerificationStatus.PROVEN_SMT,
+                status=VerificationStatus.PROVEN_REAL_GLOBAL,
                 counterexamples_found=0,
             )
         ],
+        benchmarks=[bench],
+        tool_versions={"python": "3.11.9", "z3": "4.13.0"},
+        config=cfg,
+        real_arithmetic_proof=proof,
+        numerical_deployment_assurance=assurance,
     )
-    cfg = DecompileConfig()
-    assert cfg.regime_method == "oblique_tree"
+    pareto = ParetoCandidate(
+        candidate_id="regimes_3",
+        max_regimes_budget=4,
+        actual_regimes=3,
+        ast_nodes=25,
+        status=VerificationStatus.PROVEN_REAL_GLOBAL,
+        agreement_rate=1.0,
+        max_abs_error=0.01,
+        mean_abs_error=0.005,
+        c99_p50_us=0.5,
+        c99_native_ns=12.5,
+        c_source_bytes=1200,
+        is_pareto_optimal=True,
+        program_sha256=prog.sha256(),
+    )
+    expl = DecisionExplanation(
+        x=[-1.0, 0.5],
+        regime_id=0,
+        regime_name="left_low",
+        regime_proven=True,
+        nn_output=[-1.0, 0.5],
+        program_output=[-1.0, 0.5],
+        abs_error=0.0,
+        summary_text="Routed to regime 0 (left_low).",
+    )
+    manifest = ArtifactManifest(
+        created_at="2026-11-23T00:00:00Z",
+        model_name="mlp_test",
+        files={"mlp_test.c": "deadbeef"},
+        tool_versions={"glassbox": "0.2.0"},
+        config=cfg,
+    )
+    report = BundleVerificationReport(
+        verdict="VERIFIED_REPRODUCED",
+        bundle_path="/tmp/bundle",
+        hashes_valid=True,
+        smt_replayed=True,
+        claimed_status=VerificationStatus.PROVEN_REAL_GLOBAL,
+        replayed_status=VerificationStatus.PROVEN_REAL_GLOBAL,
+        numerical_checks_passed=True,
+        details=["All hashes match"],
+        replay_time_ms=25.0,
+    )
+    assert manifest.schema_version == "2.0.0"
+    assert report.verdict == "VERIFIED_REPRODUCED"
 
     res = DecompileResult(
-        run_id="run-001",
+        run_id="run-002",
         metadata=meta,
         program=prog,
         certificate=cert,
+        benchmarks=[bench],
+        pareto_frontier=[pareto],
+        regime_neuron_profiles={0: {"active_count": 4}},
+        sample_explanations=[expl],
     )
     roundtrip = DecompileResult.model_validate_json(res.model_dump_json())
-    assert roundtrip.run_id == "run-001"
+    assert roundtrip.run_id == "run-002"
+    assert roundtrip.certificate.status.is_proven is True
+    assert roundtrip.certificate.real_arithmetic_proof is not None
+    assert roundtrip.certificate.real_arithmetic_proof.leaves_proven == 3
+    assert len(roundtrip.pareto_frontier) == 1
+    assert len(roundtrip.sample_explanations) == 1
     assert roundtrip.program.sha256() == prog.sha256()

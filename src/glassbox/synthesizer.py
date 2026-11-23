@@ -14,6 +14,7 @@ from sklearn.preprocessing import PolynomialFeatures
 
 from glassbox.ir import (
     BinaryExpr,
+    ClampExpr,
     ConstExpr,
     DecompiledProgram,
     Expr,
@@ -37,6 +38,63 @@ _OP_NEGATION = {
     ">=": "<",
     ">": "<=",
 }
+
+
+def expr_to_readable(expr: Expr, precision: int = 4) -> str:
+    """Format an IR Expr AST into a clean, human-readable mathematical string."""
+    if isinstance(expr, VarExpr):
+        return expr.name
+    if isinstance(expr, ConstExpr):
+        val = 0.0 if abs(expr.value) < 1e-15 else float(expr.value)
+        return f"{val:.{precision}f}"
+    if isinstance(expr, UnaryExpr):
+        inner = expr_to_readable(expr.operand, precision)
+        if expr.op == "neg":
+            if isinstance(expr.operand, BinaryExpr) and expr.operand.op in ("add", "sub"):
+                return f"-({inner})"
+            return f"-{inner}"
+        return f"{expr.op}({inner})"
+    if isinstance(expr, ClampExpr):
+        inner = expr_to_readable(expr.operand, precision)
+        return f"clamp({inner}, {expr.low:.{precision}f}, {expr.high:.{precision}f})"
+    if isinstance(expr, BinaryExpr):
+        l_str = expr_to_readable(expr.left, precision)
+        r_str = expr_to_readable(expr.right, precision)
+        if expr.op in ("min", "max"):
+            return f"{expr.op}({l_str}, {r_str})"
+        if expr.op == "add":
+            return f"{l_str} + {r_str}"
+        if expr.op == "sub":
+            if isinstance(expr.right, BinaryExpr) and expr.right.op in ("add", "sub"):
+                return f"{l_str} - ({r_str})"
+            return f"{l_str} - {r_str}"
+        if expr.op == "mul":
+            lhs = (
+                f"({l_str})"
+                if isinstance(expr.left, BinaryExpr) and expr.left.op in ("add", "sub")
+                else l_str
+            )
+            rhs = (
+                f"({r_str})"
+                if isinstance(expr.right, BinaryExpr) and expr.right.op in ("add", "sub")
+                else r_str
+            )
+            return f"{lhs}*{rhs}"
+        if expr.op == "div":
+            lhs = (
+                f"({l_str})"
+                if isinstance(expr.left, BinaryExpr) and expr.left.op in ("add", "sub")
+                else l_str
+            )
+            rhs = (
+                f"({r_str})"
+                if isinstance(expr.right, BinaryExpr)
+                and expr.right.op in ("add", "sub", "mul", "div")
+                else r_str
+            )
+            return f"{lhs} / {rhs}"
+        raise ValueError(f"Unsupported binary op: {expr.op}")
+    raise TypeError(f"Unsupported expr type: {type(expr)!r}")
 
 
 def linear_to_expr(
@@ -136,7 +194,6 @@ def sympy_to_expr(
             return VarExpr(index=name_to_idx[node.name], name=node.name)
 
         if isinstance(node, sp.Add):
-            # Order symbolic terms deterministically and place pure numbers last.
             sym_terms = [a for a in node.args if not isinstance(a, sp.Number)]
             num_terms = [a for a in node.args if isinstance(a, sp.Number)]
             sym_terms.sort(key=sp.default_sort_key)
@@ -261,9 +318,14 @@ def _solve_centered_ridge(
     n_samples: int,
     alpha_small: float = 1e-9,
 ) -> np.ndarray:
+    sub = Xc[:, cols]
+    if n_samples > len(cols):
+        coef_ls, _, rank, s = np.linalg.lstsq(sub, yc, rcond=None)
+        if rank == len(cols) and len(s) > 0 and (s[0] / max(float(s[-1]), 1e-30)) < 1e10:
+            return np.asarray(coef_ls, dtype=np.float64)
     alpha = alpha_small if n_samples > len(cols) else 1e-3
     reg = Ridge(alpha=alpha, fit_intercept=False)
-    reg.fit(Xc[:, cols], yc)
+    reg.fit(sub, yc)
     return np.asarray(reg.coef_, dtype=np.float64)
 
 
@@ -311,15 +373,15 @@ def _prune_and_refit(
         cand_pred = Phi @ cand_coef + cand_bias
         cand_mse = float(np.average((y - cand_pred) ** 2, weights=w_norm))
         cand_max = float(np.max(np.abs(y - cand_pred)))
+        shift_max = float(np.max(np.abs(cand_pred - base_pred)))
 
         safe_mse = cand_mse <= max(base_mse * 1.25 + 1e-10, 1e-8)
-        safe_max = cand_max <= max(base_max * 1.25 + 1e-8, 1e-6)
+        safe_max = cand_max <= max(base_max * 1.25 + 1e-8, 1e-6) and shift_max <= 1e-5
         if safe_mse and safe_max:
             best_coef, best_bias, best_mse, best_max = cand_coef, cand_bias, cand_mse, cand_max
             break
         if not dropped:
             break
-        # Restore the largest-impact dropped term and re-evaluate.
         kept.append(dropped.pop(0))
 
     if abs(best_bias) < threshold:
@@ -340,8 +402,9 @@ def _fit_linear_target(
     X_leaf: np.ndarray,
     y_leaf: np.ndarray,
     w_norm: np.ndarray,
+    prune: bool = True,
 ) -> tuple[np.ndarray, float, float, int]:
-    """Fit sparse weighted linear regression w . x + b on a leaf."""
+    """Fit weighted linear regression w . x + b on a leaf."""
     n, d = X_leaf.shape
     if n == 0:
         return np.zeros(d, dtype=np.float64), 0.0, 0.0, 1
@@ -361,7 +424,17 @@ def _fit_linear_target(
         return np.zeros(d, dtype=np.float64), y_mean, mse, 1
 
     coef_init = np.zeros(d, dtype=np.float64)
-    coef_init[valid_cols] = _solve_centered_ridge(Xc, yc, valid_cols, n, alpha_small=1e-8)
+    coef_init[valid_cols] = _solve_centered_ridge(Xc, yc, valid_cols, n, alpha_small=1e-9)
+    if not prune:
+        coef_init[np.abs(coef_init) <= 1e-12] = 0.0
+        bias_init = y_mean - float(x_mean @ coef_init)
+        if abs(bias_init) <= 1e-12:
+            bias_init = 0.0
+        pred = X_leaf @ coef_init + bias_init
+        mse = float(np.average((y_leaf - pred) ** 2, weights=w_norm))
+        k_eff = int(np.sum(np.abs(coef_init) > 1e-12)) + (1 if abs(bias_init) > 1e-12 else 0)
+        return coef_init, bias_init, mse, max(1, k_eff)
+
     coef, bias, mse, _ = _prune_and_refit(
         X_leaf, Xc, x_mean, y_leaf, yc, y_mean, w_norm, valid_cols, coef_init
     )
@@ -425,10 +498,8 @@ def _fit_regression_expr(
         if best_candidate is None or bic_p < best_candidate[0]:
             best_candidate = (bic_p, coef_p, bias_p, mse_p)
 
-    # Dense Ridge candidate with pruning
     _eval_support(valid_cols)
 
-    # Sparse OMP sweep over normalized polynomial basis
     max_k = min(len(valid_cols), max(1, n // 3), 16)
     for k in range(1, max_k + 1):
         omp = OrthogonalMatchingPursuit(n_nonzero_coefs=k, fit_intercept=False)
@@ -462,6 +533,108 @@ def _fit_regression_expr(
         expr_sym = expr_sym + term
     expr_sym = sp.expand(expr_sym)
     return sympy_to_expr(expr_sym, feature_names, zero_tol=1e-12)
+
+
+def _sample_margins(scores: np.ndarray, cls_ids: np.ndarray) -> np.ndarray:
+    n, out_dim = scores.shape
+    if out_dim < 2:
+        return scores.reshape(-1)
+    margins = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        c = int(cls_ids[i])
+        other = [scores[i, l] for l in range(out_dim) if l != c]
+        margins[i] = float(scores[i, c]) - float(max(other))
+    return margins
+
+
+def _fit_classification_leaf(
+    X_leaf: np.ndarray,
+    Y_leaf: np.ndarray,
+    y_leaf_cls: np.ndarray,
+    w_leaf_norm: np.ndarray,
+    feature_names: Sequence[str],
+    domain_lower: Sequence[float],
+    domain_upper: Sequence[float],
+    class_names: Sequence[str],
+    classification_margin: float,
+) -> tuple[list[Expr], int | None, str | None, float]:
+    """Synthesize margin-preserving per-class linear logits and determine safe constant class_id."""
+    _, d = X_leaf.shape
+    out_dim = Y_leaf.shape[1]
+
+    W_raw = np.zeros((out_dim, d), dtype=np.float64)
+    b_raw = np.zeros(out_dim, dtype=np.float64)
+    W_pruned = np.zeros((out_dim, d), dtype=np.float64)
+    b_pruned = np.zeros(out_dim, dtype=np.float64)
+
+    for k in range(out_dim):
+        W_raw[k], b_raw[k], _, _ = _fit_linear_target(
+            X_leaf, Y_leaf[:, k], w_leaf_norm, prune=False
+        )
+        W_pruned[k], b_pruned[k], _, _ = _fit_linear_target(
+            X_leaf, Y_leaf[:, k], w_leaf_norm, prune=True
+        )
+
+    S_raw = X_leaf @ W_raw.T + b_raw
+    S_pruned = X_leaf @ W_pruned.T + b_pruned
+
+    if out_dim >= 2:
+        cls_raw = np.argmax(S_raw, axis=1)
+        cls_pruned = np.argmax(S_pruned, axis=1)
+        m_raw = _sample_margins(S_raw, y_leaf_cls)
+        m_pruned = _sample_margins(S_pruned, y_leaf_cls)
+        pruning_safe = (
+            np.array_equal(cls_pruned, cls_raw)
+            and np.array_equal(cls_pruned == y_leaf_cls, cls_raw == y_leaf_cls)
+            and float(np.min(m_pruned - m_raw)) >= -1e-5
+            and float(np.max(np.abs(S_pruned - S_raw))) <= 1e-5
+        )
+    else:
+        pruning_safe = float(np.max(np.abs(S_pruned - S_raw))) <= 1e-5
+
+    W_final = W_pruned if pruning_safe else W_raw
+    b_final = b_pruned if pruning_safe else b_raw
+    S_final = S_pruned if pruning_safe else S_raw
+
+    exprs = [
+        linear_to_expr(W_final[k], float(b_final[k]), feature_names, zero_tol=1e-12)
+        for k in range(out_dim)
+    ]
+
+    n_cls_slots = max(out_dim, int(np.max(y_leaf_cls)) + 1)
+    cls_weights = np.zeros(n_cls_slots, dtype=np.float64)
+    np.add.at(cls_weights, y_leaf_cls, w_leaf_norm)
+    dominant = int(np.argmax(cls_weights))
+
+    if out_dim == 1:
+        purity = float(cls_weights[dominant] / max(float(np.sum(cls_weights)), 1e-12))
+        cname = class_names[dominant] if dominant < len(class_names) else f"class_{dominant}"
+        return exprs, dominant, cname, float(max(0.0, 1.0 - purity))
+
+    pred_cls = np.argmax(S_final, axis=1)
+    all_agree = bool(np.all(y_leaf_cls == dominant) and np.all(pred_cls == dominant))
+    margin_floor = max(0.25, 4.0 * float(classification_margin))
+
+    other_cols = [c for c in range(out_dim) if c != dominant]
+    nn_margins = Y_leaf[:, dominant] - np.max(Y_leaf[:, other_cols], axis=1)
+    min_nn_margin = float(np.min(nn_margins))
+
+    dom_low = np.asarray(domain_lower, dtype=np.float64)
+    dom_high = np.asarray(domain_upper, dtype=np.float64)
+    domain_min_margins: list[float] = []
+    for c in other_cols:
+        dw = W_final[dominant] - W_final[c]
+        db = float(b_final[dominant] - b_final[c])
+        worst = db + float(np.sum(np.where(dw >= 0.0, dw * dom_low, dw * dom_high)))
+        domain_min_margins.append(worst)
+    min_domain_margin = min(domain_min_margins) if domain_min_margins else 0.0
+
+    if all_agree and min_nn_margin >= margin_floor and min_domain_margin >= margin_floor:
+        cname = class_names[dominant] if dominant < len(class_names) else f"class_{dominant}"
+        return exprs, dominant, cname, 0.0
+
+    acc = float(np.average((pred_cls == y_leaf_cls).astype(np.float64), weights=w_leaf_norm))
+    return exprs, None, None, float(max(0.0, 1.0 - acc))
 
 
 def _sanitize_ident(name: str) -> str:
@@ -504,7 +677,6 @@ def _prepare_targets(
             Y_arr = Y_arr[:, None]
         return Y_arr, None
 
-    # Classification: support either (N, C) logits/scores or 1D class indices
     if Y_arr.ndim == 1 or (Y_arr.ndim == 2 and Y_arr.shape[1] == 1 and output_dim >= 2):
         y_cls = Y_arr.reshape(-1).astype(np.int64)
         n = len(y_cls)
@@ -615,45 +787,29 @@ def synthesize_program(
                     dtype=np.float64,
                 )
                 node.local_error = float(
-                    np.sqrt(np.average((Y_target[idx] - pred_leaf) ** 2, weights=w_leaf_norm, axis=0).mean())
+                    np.sqrt(
+                        np.average(
+                            (Y_target[idx] - pred_leaf) ** 2, weights=w_leaf_norm, axis=0
+                        ).mean()
+                    )
                 )
             else:
                 assert y_cls is not None
-                exprs = []
-                for k in range(out_dim):
-                    coef_k, bias_k, _, _ = _fit_linear_target(
-                        X_leaf, Y_target[idx, k], w_leaf_norm
-                    )
-                    exprs.append(linear_to_expr(coef_k, bias_k, feature_names, zero_tol=1e-12))
+                exprs, cls_id, cls_name, loc_err = _fit_classification_leaf(
+                    X_leaf,
+                    Y_target[idx],
+                    y_cls[idx],
+                    w_leaf_norm,
+                    feature_names,
+                    domain.lower_bounds,
+                    domain.upper_bounds,
+                    domain.class_names,
+                    config.classification_margin,
+                )
                 node.output_exprs = exprs
-
-                y_leaf_cls = y_cls[idx]
-                n_cls_slots = max(out_dim, int(np.max(y_leaf_cls)) + 1)
-                cls_weights = np.zeros(n_cls_slots, dtype=np.float64)
-                np.add.at(cls_weights, y_leaf_cls, w_leaf_norm)
-                dominant = int(np.argmax(cls_weights))
-                purity = float(cls_weights[dominant] / max(float(np.sum(cls_weights)), 1e-12))
-
-                if len(idx) < 4 or purity >= 0.995 or out_dim == 1:
-                    node.class_id = dominant
-                    node.class_name = (
-                        domain.class_names[dominant]
-                        if dominant < len(domain.class_names)
-                        else f"class_{dominant}"
-                    )
-                    node.local_error = float(max(0.0, 1.0 - purity))
-                else:
-                    node.class_id = None
-                    node.class_name = None
-                    pred_scores = np.array(
-                        [[eval_expr(expr, row) for expr in exprs] for row in X_leaf],
-                        dtype=np.float64,
-                    )
-                    pred_cls = np.argmax(pred_scores, axis=1)
-                    acc = float(
-                        np.average((pred_cls == y_leaf_cls).astype(np.float64), weights=w_leaf_norm)
-                    )
-                    node.local_error = float(max(0.0, 1.0 - acc))
+                node.class_id = cls_id
+                node.class_name = cls_name
+                node.local_error = loc_err
 
         node.name = f"regime_{node.regime_id}_{_leaf_direction_tag(path)}"
         guard_summary = (
@@ -681,6 +837,7 @@ def synthesize_program(
 
 
 __all__ = [
+    "expr_to_readable",
     "linear_to_expr",
     "sympy_to_expr",
     "synthesize_program",

@@ -10,16 +10,23 @@ from torch import nn
 
 from glassbox.ir import (
     BinaryExpr,
+    ClampExpr,
     ConstExpr,
     GuardNode,
     LinearGuard,
     RegimeLeaf,
+    UnaryExpr,
     VarExpr,
     eval_expr,
 )
 from glassbox.loader import LoadedModel
 from glassbox.regimes import RegimePartition
-from glassbox.synthesizer import linear_to_expr, sympy_to_expr, synthesize_program
+from glassbox.synthesizer import (
+    expr_to_readable,
+    linear_to_expr,
+    sympy_to_expr,
+    synthesize_program,
+)
 from glassbox.types import DecompileConfig, DomainSpec, TaskType
 
 
@@ -317,3 +324,87 @@ def test_weighted_synthesis_prioritizes_high_weight_points(tmp_path) -> None:
     )
     prog = synthesize_program(model, X, Y, DecompileConfig(max_degree=1), weights=weights, partition=part)
     assert np.max(np.abs(prog.predict(X[:50]) - Y[:50])) < 1e-4
+
+
+def test_expr_to_readable_formatting() -> None:
+    x0 = VarExpr(index=0, name="x0")
+    x1 = VarExpr(index=1, name="x1")
+
+    lin = linear_to_expr([2.0, -1.0], 3.5, ["x0", "x1"])
+    assert expr_to_readable(lin, precision=2) == "2.00*x0 - x1 + 3.50"
+
+    neg_sum = UnaryExpr(op="neg", operand=BinaryExpr(op="add", left=x0, right=x1))
+    assert expr_to_readable(neg_sum, precision=2) == "-(x0 + x1)"
+
+    relu_clamp = BinaryExpr(
+        op="div",
+        left=UnaryExpr(op="relu", operand=x0),
+        right=ClampExpr(operand=x1, low=-1.0, high=1.0),
+    )
+    assert expr_to_readable(relu_clamp, precision=1) == "relu(x0) / clamp(x1, -1.0, 1.0)"
+
+    minmax = BinaryExpr(
+        op="max",
+        left=BinaryExpr(op="min", left=x0, right=x1),
+        right=ConstExpr(value=0.0),
+    )
+    assert expr_to_readable(minmax, precision=2) == "max(min(x0, x1), 0.00)"
+
+
+def test_classification_margin_preserving_and_near_boundary_leaf(tmp_path) -> None:
+    domain = DomainSpec(
+        feature_names=["x0", "x1"],
+        lower_bounds=[-1.0, -1.0],
+        upper_bounds=[1.0, 1.0],
+        output_names=["logit_0", "logit_1", "logit_2"],
+        task_type=TaskType.CLASSIFICATION,
+        class_names=["left", "right", "aux"],
+    )
+    model = LoadedModel.from_pytorch(_ClassifierNet(), domain, tmp_path / "cls_margin.onnx")
+
+    rng = np.random.default_rng(314)
+    # Sample points that all lie on one side (x0 > -0.8) where logit_1 > logit_0,
+    # even though the oblique boundary (x0 = -0.85) passes inside the domain [-1, 1]^2!
+    X = rng.uniform([-0.75, -1.0], [1.0, 1.0], size=(120, 2))
+    # Include a small 5e-5 term on x1 that determines class near tie points
+    Y = np.column_stack(
+        [
+            -0.85 - X[:, 0] - 5e-5 * X[:, 1],
+            0.85 + X[:, 0] + 5e-5 * X[:, 1],
+            np.full(len(X), -5.0),
+        ]
+    )
+    # Add two near-tie points where the 5e-5 * x1 term determines the margin/winner
+    X_tie = np.array([[-0.85, 0.8], [-0.85, -0.8]], dtype=np.float64)
+    Y_tie = np.column_stack(
+        [
+            -0.85 - X_tie[:, 0] - 5e-5 * X_tie[:, 1],
+            0.85 + X_tie[:, 0] + 5e-5 * X_tie[:, 1],
+            np.full(len(X_tie), -5.0),
+        ]
+    )
+    X_all = np.vstack([X, X_tie])
+    Y_all = np.vstack([Y, Y_tie])
+
+    part = RegimePartition(
+        root=RegimeLeaf(
+            regime_id=0,
+            name="r0",
+            description="",
+            output_exprs=[ConstExpr(value=0.0)] * 3,
+        ),
+        leaf_indices={0: np.arange(len(X_all))},
+    )
+    prog = synthesize_program(
+        model,
+        X_all,
+        Y_all,
+        DecompileConfig(task_type=TaskType.CLASSIFICATION, classification_margin=0.05),
+        partition=part,
+    )
+    leaf = prog.leaves()[0]
+    # Leaf must NOT collapse to a constant class_id because the boundary crosses the domain
+    assert leaf.class_id is None
+    # Margin-preserving synthesis must not prune the 5e-5*x1 term that decides X_tie
+    assert np.array_equal(prog.predict_classes(X_all), np.argmax(Y_all, axis=1))
+    assert np.max(np.abs(prog.predict(X_all) - Y_all)) < 1e-10

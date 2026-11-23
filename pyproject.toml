@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "glassbox-decompiler"
-version = "0.1.0"
+version = "0.2.0"
 description = "Verifiable neural-network-to-program decompiler via CEGIS and SMT verification"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -28,9 +28,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
-    "httpx",
-    "ruff",
+    "pytest>=8.0",
+    "httpx>=0.27",
+    "ruff>=0.6",
+]
+native = [
+    "ziglang>=0.13",
 ]
 
 [project.scripts]

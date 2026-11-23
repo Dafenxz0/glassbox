@@ -23,7 +23,13 @@ from pydantic import BaseModel, ValidationError
 from glassbox import __version__
 from glassbox.cli import run_decompile_pipeline
 from glassbox.ir import DecompileResult
-from glassbox.types import CEGISIteration, DecompileConfig, DomainSpec, TaskType
+from glassbox.types import (
+    CEGISIteration,
+    DecisionExplanation,
+    DecompileConfig,
+    DomainSpec,
+    TaskType,
+)
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -36,6 +42,7 @@ class DecompileRequest(BaseModel):
     model_id: str
     config: DecompileConfig | None = None
     run_benchmarks: bool = True
+    run_pareto: bool = False
 
 
 class SliceRequest(BaseModel):
@@ -46,6 +53,13 @@ class SliceRequest(BaseModel):
     dim_y: int
     fixed_values: list[float] | None = None
     resolution: int = 48
+
+
+class ExplainRequest(BaseModel):
+    """Request payload for deterministic single-input decision explanation."""
+
+    run_id: str
+    x: list[float]
 
 
 def _z3_available() -> bool:
@@ -59,6 +73,41 @@ def _sanitize_id(raw: str) -> str:
 
 def _sse_frame(event: str, payload: Any) -> str:
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+
+
+def _fallback_explain_decision(
+    model: Any,
+    result: DecompileResult,
+    x: list[float],
+    leaf_proven_map: dict[int, bool] | None,
+) -> DecisionExplanation:
+    prog_out, leaf, guard_trace = result.program.trace_one(x)
+    x_arr = np.asarray([x], dtype=np.float64)
+    nn_out = [float(v) for v in model.predict(x_arr)[0]] if model is not None else list(prog_out)
+    abs_err = float(max(abs(a - b) for a, b in zip(nn_out, prog_out))) if nn_out else 0.0
+    is_cls = result.metadata.domain.task_type == TaskType.CLASSIFICATION
+    nn_cls = int(model.predict_classes(x_arr)[0]) if (is_cls and model is not None) else None
+    prog_cls = int(result.program.predict_classes(x_arr)[0]) if is_cls else None
+    proven = bool(leaf_proven_map.get(leaf.regime_id, False)) if leaf_proven_map else False
+    formula_trace = [
+        {"output_name": oname, "value": float(val)}
+        for oname, val in zip(result.metadata.domain.output_names, prog_out)
+    ]
+    return DecisionExplanation(
+        x=[float(v) for v in x],
+        regime_id=leaf.regime_id,
+        regime_name=leaf.name,
+        regime_proven=proven,
+        guard_trace=guard_trace,
+        formula_trace=formula_trace,
+        nn_output=nn_out,
+        program_output=[float(v) for v in prog_out],
+        nn_class=nn_cls,
+        program_class=prog_cls,
+        abs_error=abs_err,
+        active_neurons=[],
+        summary_text=f"Routed to regime #{leaf.regime_id} ({leaf.name}); max |Δ| = {abs_err:.5f}.",
+    )
 
 
 def compute_slice_payload(
@@ -163,6 +212,7 @@ def create_app(
     resolved_models = (models_dir or (root / "models")).resolve()
     resolved_studio = (studio_dir or (root / "studio")).resolve()
     resolved_site = (site_dir or (root / "site")).resolve()
+    resolved_bundles = (root / "bundles").resolve()
     upload_dir = Path(tempfile.mkdtemp(prefix="glassbox_uploads_"))
 
     app = FastAPI(title="GlassBox Studio API", version=__version__)
@@ -371,6 +421,7 @@ def create_app(
             loaded,
             cfg,
             run_benchmarks_flag=req.run_benchmarks,
+            run_pareto_flag=req.run_pareto,
             run_id=run_id,
         )
         run_cache[result.run_id] = {"result": result, "model": loaded}
@@ -396,6 +447,7 @@ def create_app(
                     loaded,
                     cfg,
                     run_benchmarks_flag=req.run_benchmarks,
+                    run_pareto_flag=req.run_pareto,
                     on_iteration=_on_iter,
                     run_id=run_id,
                 )
@@ -426,6 +478,73 @@ def create_app(
     def get_run(run_id: str) -> dict[str, Any]:
         result, _ = _load_run_entry(run_id)
         return result.model_dump(mode="json")
+
+    @app.get("/api/runs/{run_id}/bundle")
+    def get_run_bundle(run_id: str) -> dict[str, Any]:
+        result, model_obj = _load_run_entry(run_id)
+        stem = _sanitize_id(result.metadata.name or run_id)
+        bundle_dir = resolved_bundles / f"{stem}.gbundle"
+        if not bundle_dir.is_dir():
+            bundle_dir = upload_dir / f"{_sanitize_id(run_id)}.gbundle"
+            if not bundle_dir.is_dir() and model_obj is not None:
+                try:
+                    from glassbox.certificate import write_artifact_bundle
+
+                    model_path = Path(getattr(model_obj, "path", result.metadata.path))
+                    if model_path.is_file():
+                        write_artifact_bundle(result, model_path, bundle_dir)
+                except (ImportError, OSError):
+                    pass
+
+        manifest_path = bundle_dir / "manifest.json"
+        manifest_data: dict[str, Any] | None = None
+        verification_data: dict[str, Any] | None = None
+        if manifest_path.is_file():
+            manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            try:
+                from glassbox.certificate import verify_artifact_bundle
+
+                report = verify_artifact_bundle(bundle_dir, recompute_smt=False)
+                verification_data = report.model_dump(mode="json")
+            except ImportError:
+                pass
+
+        return {
+            "run_id": result.run_id,
+            "model_name": result.metadata.name,
+            "bundle_available": manifest_data is not None,
+            "bundle_path": f"bundles/{stem}.gbundle",
+            "cli_verify_command": f"glassbox verify bundles/{stem}.gbundle",
+            "manifest": manifest_data,
+            "verification": verification_data,
+        }
+
+    @app.post("/api/explain")
+    def explain_point(req: ExplainRequest) -> dict[str, Any]:
+        result, model_obj = _load_run_entry(req.run_id)
+        d = result.metadata.input_dim
+        if len(req.x) != d:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Expected input vector x of length {d}, got {len(req.x)}",
+            )
+        leaf_map = (
+            result.certificate.real_arithmetic_proof.leaf_proven_map
+            if result.certificate.real_arithmetic_proof is not None
+            else None
+        )
+        if model_obj is not None:
+            try:
+                from glassbox.loader import explain_decision
+
+                exp = explain_decision(
+                    model_obj, result.program, req.x, leaf_proven_map=leaf_map
+                )
+                return exp.model_dump(mode="json")
+            except ImportError:
+                pass
+        exp = _fallback_explain_decision(model_obj, result, req.x, leaf_map)
+        return exp.model_dump(mode="json")
 
     @app.post("/api/slice")
     def slice_space(req: SliceRequest) -> dict[str, Any]:

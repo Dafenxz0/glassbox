@@ -62,7 +62,6 @@ def test_train_zoo_deterministic_and_idempotent(tmp_path: Path) -> None:
         assert p.exists()
         assert p.with_suffix(".meta.json").exists()
 
-    # Second call without force should reuse existing files.
     mtimes_before = [p.stat().st_mtime_ns for p in paths_first]
     paths_second = train_zoo(tmp_path, force=False)
     mtimes_after = [p.stat().st_mtime_ns for p in paths_second]
@@ -154,10 +153,7 @@ def test_run_benchmarks_all_runtimes(tmp_path: Path) -> None:
         loaded.metadata.domain.upper_bounds,
         size=(5, 3),
     )
-    golden = [
-        (row.tolist(), *program.evaluate_one(row.tolist()))
-        for row in X_gold
-    ]
+    golden = [(row.tolist(), *program.evaluate_one(row.tolist())) for row in X_gold]
     emitted = emit_all(program, golden_vectors=golden)
 
     entries = run_benchmarks(
@@ -168,23 +164,37 @@ def test_run_benchmarks_all_runtimes(tmp_path: Path) -> None:
         n_warmup=20,
         n_iters=200,
     )
+    assert len(entries) == 6
     by_name = {e.runtime: e for e in entries}
     assert set(by_name.keys()) == {
-        "ONNX Runtime (CPU)",
-        "PyTorch (Eager CPU)",
+        "ONNX Runtime (CPU, batch=1)",
+        "ONNX Runtime (CPU, batch=64)",
+        "PyTorch (Eager CPU, batch=1)",
         "Decompiled Python (Zero-Dep)",
-        "Decompiled C99 (Native DLL)",
+        "Decompiled C99 (ctypes FFI)",
+        "Decompiled C99 (Native C Loop)",
     }
     for entry in entries:
         assert entry.available is True, f"{entry.runtime} unavailable: {entry.note}"
         assert entry.p50_us >= 0.0
-        assert entry.throughput_ips > 0.0
+        assert entry.measured_throughput_ips > 0.0
+        assert entry.throughput_ips == entry.measured_throughput_ips
         assert entry.artifact_bytes > 0
         assert entry.speedup_vs_onnx > 0.0
+        assert entry.max_diff_vs_ref < 1e-6
 
-    assert by_name["PyTorch (Eager CPU)"].max_diff_vs_ref < 1e-5
+    assert by_name["ONNX Runtime (CPU, batch=64)"].batch_size == 64
+    assert by_name["Decompiled Python (Zero-Dep)"].source_bytes > 0
+    assert by_name["Decompiled Python (Zero-Dep)"].binary_bytes == 0
     assert by_name["Decompiled Python (Zero-Dep)"].max_diff_vs_ref < 1e-9
-    assert by_name["Decompiled C99 (Native DLL)"].max_diff_vs_ref < 1e-6
+
+    c_ffi = by_name["Decompiled C99 (ctypes FFI)"]
+    c_loop = by_name["Decompiled C99 (Native C Loop)"]
+    assert c_ffi.source_bytes > 0
+    assert c_ffi.binary_bytes > 0
+    assert c_ffi.compiler != ""
+    assert c_loop.native_loop_p50_ns is not None and c_loop.native_loop_p50_ns > 0.0
+    assert c_loop.measured_throughput_ips > c_ffi.measured_throughput_ips
 
 
 def test_run_benchmarks_handles_missing_emitted_code() -> None:
@@ -206,6 +216,8 @@ def test_run_benchmarks_handles_missing_emitted_code() -> None:
     )
     entries = run_benchmarks(loaded, program, {}, n_warmup=5, n_iters=20)
     by_name = {e.runtime: e for e in entries}
-    assert by_name["ONNX Runtime (CPU)"].available is True
+    assert by_name["ONNX Runtime (CPU, batch=1)"].available is True
+    assert by_name["ONNX Runtime (CPU, batch=64)"].available is True
     assert by_name["Decompiled Python (Zero-Dep)"].available is False
-    assert by_name["Decompiled C99 (Native DLL)"].available is False
+    assert by_name["Decompiled C99 (ctypes FFI)"].available is False
+    assert by_name["Decompiled C99 (Native C Loop)"].available is False

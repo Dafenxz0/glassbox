@@ -1,4 +1,4 @@
-/* GlassBox Studio — Taste Skill v2.5.1 + modern-web-guidance */
+/* GlassBox Studio 2.0 — Taste Skill v2.5.1 + modern-web-guidance */
 
 :root {
   color-scheme: light dark;
@@ -35,14 +35,15 @@
   --code-border: #2c2c2c;
   --code-highlight: rgba(77, 124, 254, 0.16);
 
-  /* Status tokens (emerald, amber, red, neutral — zero violet/lavender) */
+  /* Status tokens (emerald, teal, amber, red, neutral — zero violet/lavender) */
   --emerald: light-dark(#0d8a55, #34d399);
   --emerald-soft: light-dark(#e7f7ef, #0e2d20);
+  --teal: light-dark(#0f766e, #2dd4bf);
+  --teal-soft: light-dark(#e6f6f4, #0f2c2a);
   --amber: light-dark(#b45309, #fbbf24);
   --amber-soft: light-dark(#fef4e4, #2f2008);
   --red: light-dark(#c81e1e, #f87171);
   --red-soft: light-dark(#fdecec, #331313);
-  --teal: light-dark(#0f766e, #2dd4bf);
 
   --font-display: "Epilogue", system-ui, -apple-system, sans-serif;
   --font-text: "Epilogue", system-ui, -apple-system, sans-serif;
@@ -80,11 +81,12 @@
     --border-strong: #c8c8c8;
     --emerald: #0d8a55;
     --emerald-soft: #e7f7ef;
+    --teal: #0f766e;
+    --teal-soft: #e6f6f4;
     --amber: #b45309;
     --amber-soft: #fef4e4;
     --red: #c81e1e;
     --red-soft: #fdecec;
-    --teal: #0f766e;
   }
 }
 
@@ -432,7 +434,7 @@ body {
    ============================================================ */
 .workbench {
   display: grid;
-  grid-template-columns: minmax(275px, 315px) minmax(0, 1fr) minmax(350px, 430px);
+  grid-template-columns: minmax(280px, 325px) minmax(0, 1fr) minmax(355px, 440px);
   gap: 14px;
   padding: 14px 18px 20px;
   align-items: start;
@@ -523,6 +525,13 @@ body {
   color: var(--muted);
 }
 
+.verif-tier-sub {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
 .tag-pill {
   display: inline-flex;
   align-items: center;
@@ -535,7 +544,7 @@ body {
   color: var(--muted);
 }
 
-/* Verification Badge */
+/* Two-Tier Verification Badges */
 .status-badge {
   display: inline-flex;
   align-items: center;
@@ -547,12 +556,19 @@ body {
   letter-spacing: 0.02em;
 }
 
+.status-badge[data-status="PROVEN_REAL_GLOBAL"],
 .status-badge[data-status="PROVEN_SMT"] {
   background: var(--emerald-soft);
   color: var(--emerald);
 }
 
-.status-badge[data-status="BOUNDED_EMPIRICAL"] {
+.status-badge[data-status="PROVEN_REAL_MARGIN"] {
+  background: var(--teal-soft);
+  color: var(--teal);
+}
+
+.status-badge[data-status="BOUNDED_EMPIRICAL"],
+.status-badge[data-status="TIMEOUT"] {
   background: var(--amber-soft);
   color: var(--amber);
 }
@@ -562,6 +578,7 @@ body {
   color: var(--red);
 }
 
+.status-badge[data-status="UNKNOWN"],
 .status-badge[data-status="UNVERIFIED"] {
   background: var(--bg);
   color: var(--muted);
@@ -599,6 +616,61 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Pareto Frontier Explorer */
+.pareto-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.pareto-point {
+  cursor: pointer;
+}
+
+.pareto-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.pareto-pill {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 3px 7px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.pareto-pill:hover {
+  border-color: var(--accent);
+}
+
+.pareto-pill.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.pareto-preview-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+}
+
+.pareto-preview-bar[hidden] {
+  display: none;
 }
 
 /* Layer Stack */
@@ -666,7 +738,7 @@ body {
   color: var(--accent);
 }
 
-/* Operating Regimes List */
+/* Operating Regimes List & Neuron Attribution Badges */
 .regime-list {
   display: flex;
   flex-direction: column;
@@ -726,6 +798,32 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.regime-neuron-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.neuron-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--ink);
+}
+
+.neuron-chip.is-proven {
+  background: var(--emerald-soft);
+  color: var(--emerald);
+  border-color: transparent;
 }
 
 /* CEGIS Chart */
@@ -967,7 +1065,7 @@ body {
 }
 
 /* ============================================================
-   RIGHT PANE: MRI HEATMAP, COUNTEREXAMPLES, BENCHMARKS
+   RIGHT PANE: MRI HEATMAP, EXPLAIN THIS DECISION, BENCHMARKS
    ============================================================ */
 .inline-select select {
   background: var(--bg);
@@ -1119,6 +1217,115 @@ body {
   word-break: break-word;
 }
 
+/* Explain This Decision & Rule-to-Neuron Attribution */
+.explain-sample-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+
+.explain-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 11.5px;
+}
+
+.explain-summary-box {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-sm);
+  padding: 7px 9px;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.explain-subhead {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin: 2px 0 0;
+}
+
+.explain-trace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.explain-step {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 5px 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.explain-step-expr {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explain-branch {
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+
+.explain-branch.is-true {
+  background: var(--emerald-soft);
+  color: var(--emerald);
+}
+
+.explain-branch.is-false {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.neuron-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 7px 8px;
+}
+
+.neuron-bar-row {
+  display: grid;
+  grid-template-columns: 74px 1fr 48px;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.neuron-bar-track {
+  height: 6px;
+  background: var(--surface);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.neuron-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
 /* Counterexamples Table */
 .table-wrap {
   overflow-x: auto;
@@ -1240,7 +1447,9 @@ body {
 
 .bench-sub {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
+  gap: 4px 8px;
   margin-top: 4px;
   font-family: var(--font-mono);
   font-size: 10px;
@@ -1265,7 +1474,7 @@ dialog.studio-dialog {
 }
 
 dialog.studio-dialog-wide {
-  width: min(680px, calc(100vw - 24px));
+  width: min(720px, calc(100vw - 24px));
 }
 
 dialog.studio-dialog[open] {
@@ -1353,12 +1562,27 @@ dialog::backdrop {
 .cert-summary {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
+}
+
+.cert-tier-section {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 11px 12px;
+  background: var(--bg);
+}
+
+.cert-tier-title {
+  margin: 0 0 8px;
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
 }
 
 .cert-kv-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
   gap: 8px;
 }
 
@@ -1381,4 +1605,18 @@ dialog::backdrop {
   font-family: var(--font-mono);
   font-size: 11.5px;
   word-break: break-all;
+}
+
+.cert-cli-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
 }

@@ -1,0 +1,256 @@
+{
+  "schema_version": "2.0.0",
+  "created_at": "2026-11-23T09:35:52.252571Z",
+  "model_name": "drone_altitude_pid",
+  "model_sha256": "93dde505903975a0c4bc6299a0bc2720a199399fdec2ba9ca484fcb1f2d7624d",
+  "program_sha256": "90866193c1c6d3f090655c9680b0c53589a1834787cbd65e4df75d7ec924cc4a",
+  "status": "PROVEN_REAL_GLOBAL",
+  "tolerance_eps": 0.05,
+  "classification_margin": 0.05,
+  "domain": {
+    "feature_names": [
+      "alt_error",
+      "vert_vel",
+      "battery_v"
+    ],
+    "lower_bounds": [
+      -3.0,
+      -3.0,
+      10.5
+    ],
+    "upper_bounds": [
+      3.0,
+      3.0,
+      12.6
+    ],
+    "output_names": [
+      "thrust_cmd"
+    ],
+    "task_type": "regression",
+    "class_names": []
+  },
+  "agreement_rate": 1.0,
+  "max_abs_error": 0.034540132893674746,
+  "mean_abs_error": 0.0026899742056552046,
+  "smt_checked": true,
+  "smt_proven": true,
+  "smt_timeout_s": 6.0,
+  "total_counterexamples_found": 4,
+  "cegis_iterations": [
+    {
+      "iteration": 0,
+      "agreement_rate": 1.0,
+      "max_abs_error": 0.054096937529369366,
+      "mean_abs_error": 0.001763416657544527,
+      "rmse": 0.004115357957568258,
+      "regime_count": 8,
+      "ast_nodes": 119,
+      "status": "COUNTEREXAMPLE_FOUND",
+      "counterexamples_found": 4,
+      "worst_counterexample": {
+        "iteration": 0,
+        "source": "z3_smt",
+        "x": [
+          -0.21332242745024702,
+          3.0,
+          12.6
+        ],
+        "nn_output": [
+          0.0726861263947906
+        ],
+        "program_output": [
+          0.018589188865421238
+        ],
+        "nn_class": null,
+        "program_class": null,
+        "max_abs_error": 0.054096937529369366,
+        "regime_id": 3,
+        "repaired": true
+      },
+      "smt_time_ms": 1241.1062999999558,
+      "total_time_ms": 1609.4884000012826
+    },
+    {
+      "iteration": 1,
+      "agreement_rate": 1.0,
+      "max_abs_error": 0.034540132893674746,
+      "mean_abs_error": 0.0026899742056552046,
+      "rmse": 0.004848137985734117,
+      "regime_count": 9,
+      "ast_nodes": 134,
+      "status": "PROVEN_REAL_GLOBAL",
+      "counterexamples_found": 0,
+      "worst_counterexample": null,
+      "smt_time_ms": 5159.653200000321,
+      "total_time_ms": 5318.670099999508
+    }
+  ],
+  "benchmarks": [
+    {
+      "runtime": "ONNX Runtime (CPU, batch=1)",
+      "p50_us": 8.7,
+      "p95_us": 25.2,
+      "p99_us": 38.703,
+      "throughput_ips": 95479.06621473242,
+      "artifact_bytes": 1390,
+      "speedup_vs_onnx": 1.0,
+      "max_diff_vs_ref": 0.0,
+      "available": true,
+      "note": "single-sample control-loop latency vs model.predict",
+      "measured_throughput_ips": 95479.06621473242,
+      "batch_size": 1,
+      "native_loop_p50_ns": null,
+      "source_bytes": 0,
+      "binary_bytes": 1390,
+      "compiler": ""
+    },
+    {
+      "runtime": "ONNX Runtime (CPU, batch=64)",
+      "p50_us": 0.165625,
+      "p95_us": 0.47218749999999987,
+      "p99_us": 0.5829687499999998,
+      "throughput_ips": 5921977.940632171,
+      "artifact_bytes": 1390,
+      "speedup_vs_onnx": 52.52830188679245,
+      "max_diff_vs_ref": 0.0,
+      "available": true,
+      "note": "amortized per-sample latency across batch=64",
+      "measured_throughput_ips": 5921977.940632171,
+      "batch_size": 64,
+      "native_loop_p50_ns": null,
+      "source_bytes": 0,
+      "binary_bytes": 1390,
+      "compiler": ""
+    },
+    {
+      "runtime": "PyTorch (Eager CPU, batch=1)",
+      "p50_us": 23.85,
+      "p95_us": 56.5,
+      "p99_us": 91.31499999999998,
+      "throughput_ips": 39028.04555353477,
+      "artifact_bytes": 3605,
+      "speedup_vs_onnx": 0.36477987421383645,
+      "max_diff_vs_ref": 1.7881393432617188e-7,
+      "available": true,
+      "note": "reconstructed nn.Sequential eager batch=1 vs model.predict",
+      "measured_throughput_ips": 39028.04555353477,
+      "batch_size": 1,
+      "native_loop_p50_ns": null,
+      "source_bytes": 0,
+      "binary_bytes": 3605,
+      "compiler": ""
+    },
+    {
+      "runtime": "Decompiled Python (Zero-Dep)",
+      "p50_us": 0.3,
+      "p95_us": 0.4,
+      "p99_us": 0.5,
+      "throughput_ips": 3479471.120389701,
+      "artifact_bytes": 6020,
+      "speedup_vs_onnx": 29.0,
+      "max_diff_vs_ref": 0.0,
+      "available": true,
+      "note": "zero-dep Python vs program.predict",
+      "measured_throughput_ips": 3479471.120389701,
+      "batch_size": 1,
+      "native_loop_p50_ns": null,
+      "source_bytes": 6020,
+      "binary_bytes": 0,
+      "compiler": ""
+    },
+    {
+      "runtime": "Decompiled C99 (ctypes FFI)",
+      "p50_us": 0.5,
+      "p95_us": 0.9,
+      "p99_us": 1.2,
+      "throughput_ips": 1838573.2671446956,
+      "artifact_bytes": 224256,
+      "speedup_vs_onnx": 17.4,
+      "max_diff_vs_ref": 2.220446049250313e-16,
+      "available": true,
+      "note": "ziglang cc -O3 -std=c99 single-call via Python ctypes FFI",
+      "measured_throughput_ips": 1838573.2671446956,
+      "batch_size": 1,
+      "native_loop_p50_ns": null,
+      "source_bytes": 9435,
+      "binary_bytes": 224256,
+      "compiler": "ziglang cc"
+    },
+    {
+      "runtime": "Decompiled C99 (Native C Loop)",
+      "p50_us": 0.0035099999999999997,
+      "p95_us": 0.0038819999999999996,
+      "p99_us": 0.004887999999999997,
+      "throughput_ips": 284835365.1589381,
+      "artifact_bytes": 224256,
+      "speedup_vs_onnx": 2478.6324786324785,
+      "max_diff_vs_ref": 2.220446049250313e-16,
+      "available": true,
+      "note": "ziglang cc -O3 -std=c99 in-C tight loop (3.5 ns/call, 0 FFI)",
+      "measured_throughput_ips": 284835365.1589381,
+      "batch_size": 1,
+      "native_loop_p50_ns": 3.51,
+      "source_bytes": 9435,
+      "binary_bytes": 224256,
+      "compiler": "ziglang cc"
+    }
+  ],
+  "tool_versions": {
+    "glassbox": "0.2.0",
+    "python": "3.11.9",
+    "z3": "5.4.1",
+    "onnxruntime": "1.32.0",
+    "numpy": "2.3.2",
+    "scipy": "1.17.1"
+  },
+  "config": {
+    "task_type": "regression",
+    "max_regimes": 8,
+    "max_depth": 4,
+    "regime_method": "oblique_tree",
+    "max_degree": 1,
+    "tolerance_eps": 0.05,
+    "classification_margin": 0.05,
+    "target_agreement": 0.99,
+    "max_cegis_iters": 6,
+    "initial_samples": 2000,
+    "verify_smt": true,
+    "smt_timeout_s": 6.0,
+    "adversarial_restarts": 24,
+    "seed": 42
+  },
+  "real_arithmetic_proof": {
+    "exact_rationals": true,
+    "sound_bounds_only": true,
+    "scope": "global",
+    "tolerance_eps": 0.05,
+    "classification_margin": 0.05,
+    "z3_version": "5.4.1",
+    "solver_result": "unsat",
+    "leaves_proven": 9,
+    "leaves_total": 9,
+    "leaf_proven_map": {
+      "6": true,
+      "0": true,
+      "4": true,
+      "3": true,
+      "8": true,
+      "5": true,
+      "2": true,
+      "1": true,
+      "7": true
+    },
+    "solve_time_ms": 5159.653200000321,
+    "notes": "All leaves proven unsat over exact rational QF_LRA."
+  },
+  "numerical_deployment_assurance": {
+    "onnxruntime_samples_checked": 5662,
+    "ir_vs_onnx_max_diff": 0.034540132893674746,
+    "ir_vs_onnx_agreement": 1.0,
+    "c99_compiled": true,
+    "c99_compiler": "ziglang cc",
+    "c99_vs_ir_max_diff": 2.220446049250313e-16,
+    "python_vs_ir_max_diff": 0.0,
+    "float32_soundness_note": "Real-arithmetic SMT certifies the mathematical rational MLP extracted from ONNX float32 weights; numerical deployment assurance empirically checks float32 ONNXRuntime and compiled C99/Python outputs."
+  }
+}

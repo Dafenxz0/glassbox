@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,22 @@ import onnx
 import onnxruntime as ort
 from onnx import TensorProto, numpy_helper
 
-from glassbox.types import DomainSpec, LayerInfo, ModelMetadata, TaskType
+from glassbox.ir import (
+    BinaryExpr,
+    ClampExpr,
+    ConstExpr,
+    DecompiledProgram,
+    Expr,
+    UnaryExpr,
+    VarExpr,
+)
+from glassbox.types import (
+    DecisionExplanation,
+    DomainSpec,
+    LayerInfo,
+    ModelMetadata,
+    TaskType,
+)
 
 VALID_ACTIVATIONS = frozenset({"Relu", "Tanh", "Sigmoid", "Identity"})
 
@@ -604,4 +620,247 @@ def from_pytorch(
     return load_onnx(out_path, domain=domain, name=name)
 
 
-__all__ = ["DenseLayer", "LoadedModel", "from_pytorch", "load_onnx"]
+def _format_expr_readable(expr: Expr, precision: int = 4) -> str:
+    """Format an IR Expr AST into a readable deterministic algebraic string."""
+    if isinstance(expr, VarExpr):
+        return expr.name
+    if isinstance(expr, ConstExpr):
+        return f"{expr.value:.{precision}f}"
+    if isinstance(expr, UnaryExpr):
+        inner = _format_expr_readable(expr.operand, precision)
+        if expr.op == "neg":
+            return f"-({inner})"
+        return f"{expr.op}({inner})"
+    if isinstance(expr, ClampExpr):
+        inner = _format_expr_readable(expr.operand, precision)
+        return f"clamp({inner}, {expr.low:.{precision}f}, {expr.high:.{precision}f})"
+    if isinstance(expr, BinaryExpr):
+        if expr.op == "mul":
+            if isinstance(expr.left, ConstExpr) and isinstance(expr.right, VarExpr):
+                return f"{expr.left.value:.{precision}f}*{expr.right.name}"
+            if isinstance(expr.right, ConstExpr) and isinstance(expr.left, VarExpr):
+                return f"{expr.right.value:.{precision}f}*{expr.left.name}"
+        left_s = _format_expr_readable(expr.left, precision)
+        right_s = _format_expr_readable(expr.right, precision)
+        if expr.op == "add":
+            if right_s.startswith("-"):
+                return f"{left_s} - {right_s[1:]}"
+            return f"{left_s} + {right_s}"
+        if expr.op == "sub":
+            return f"{left_s} - ({right_s})"
+        if expr.op == "mul":
+            return f"({left_s}) * ({right_s})"
+        if expr.op == "div":
+            return f"({left_s}) / ({right_s})"
+        return f"{expr.op}({left_s}, {right_s})"
+    return str(expr)
+
+
+def compute_regime_neuron_profiles(
+    model: LoadedModel,
+    program: DecompiledProgram,
+    X: np.ndarray,
+) -> dict[int, dict[str, Any]]:
+    """Compute per-regime hidden neuron activation statistics across dataset X."""
+    arr = np.asarray(X, dtype=np.float64)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2D input array, got shape {arr.shape}")
+
+    hidden_acts = model.hidden_activations(arr) if len(arr) > 0 else []
+    _, assigned = program.predict_with_regimes(arr) if len(arr) > 0 else (
+        np.empty((0, program.domain.output_dim), dtype=np.float64),
+        np.empty((0,), dtype=np.int64),
+    )
+
+    total_hidden = sum(h.shape[1] for h in hidden_acts)
+    profiles: dict[int, dict[str, Any]] = {}
+    for leaf in program.leaves():
+        rid = int(leaf.regime_id)
+        idx = np.flatnonzero(assigned == rid)
+        n_samples = len(idx)
+
+        if n_samples == 0 or not hidden_acts:
+            profiles[rid] = {
+                "regime_id": rid,
+                "regime_name": leaf.name,
+                "sample_count": n_samples,
+                "mean_layer_activation_rates": [],
+                "layer_activation_rates": [],
+                "active_neuron_count": 0,
+                "active_count": 0,
+                "total_hidden_neurons": total_hidden,
+                "top_neurons": [],
+            }
+            continue
+
+        mean_layer_rates: list[float] = []
+        layer_rates_list: list[list[float]] = []
+        all_neurons: list[dict[str, Any]] = []
+        active_count = 0
+
+        for layer_idx, h_mat in enumerate(hidden_acts):
+            h_sub = h_mat[idx]
+            rates = np.mean(h_sub > 0.0, axis=0)
+            means = np.mean(h_sub, axis=0)
+            mean_layer_rates.append(float(np.mean(rates)))
+            layer_rates_list.append([float(r) for r in rates])
+            active_count += int(np.sum(rates > 0.5))
+
+            for neuron_idx in range(h_sub.shape[1]):
+                all_neurons.append(
+                    {
+                        "layer": int(layer_idx),
+                        "neuron": int(neuron_idx),
+                        "index": int(neuron_idx),
+                        "activation_rate": float(rates[neuron_idx]),
+                        "mean_value": float(means[neuron_idx]),
+                    }
+                )
+
+        all_neurons.sort(
+            key=lambda item: (item["activation_rate"], item["mean_value"]),
+            reverse=True,
+        )
+        top_5 = [n for n in all_neurons if n["activation_rate"] > 0.0][:5]
+        if not top_5:
+            top_5 = all_neurons[:5]
+
+        profiles[rid] = {
+            "regime_id": rid,
+            "regime_name": leaf.name,
+            "sample_count": n_samples,
+            "mean_layer_activation_rates": mean_layer_rates,
+            "layer_activation_rates": layer_rates_list,
+            "active_neuron_count": active_count,
+            "active_count": active_count,
+            "total_hidden_neurons": total_hidden,
+            "top_neurons": top_5,
+        }
+
+    return profiles
+
+
+def explain_decision(
+    model: LoadedModel,
+    program: DecompiledProgram,
+    x: Sequence[float],
+    leaf_proven_map: dict[int, bool] | None = None,
+) -> DecisionExplanation:
+    """Produce a deterministic causal trace and neuron attribution for input x."""
+    x_list = [float(v) for v in x]
+    if len(x_list) != model.metadata.input_dim:
+        raise ValueError(
+            f"Expected input vector of length {model.metadata.input_dim}, got {len(x_list)}"
+        )
+    x_2d = np.asarray([x_list], dtype=np.float64)
+
+    prog_out, leaf, guard_trace = program.trace_one(x_list)
+    nn_out_arr = model.predict(x_2d)[0]
+    nn_out = [float(v) for v in nn_out_arr]
+    prog_out_f = [float(v) for v in prog_out]
+    abs_err = float(np.max(np.abs(np.asarray(nn_out) - np.asarray(prog_out_f))))
+
+    nn_class: int | None = None
+    program_class: int | None = None
+    if program.task_type == TaskType.CLASSIFICATION:
+        nn_class = int(model.predict_classes(x_2d)[0])
+        program_class = int(program.predict_classes(x_2d)[0])
+
+    formula_trace: list[dict[str, Any]] = []
+    out_names = program.domain.output_names
+    for k, expr in enumerate(leaf.output_exprs):
+        out_name = out_names[k] if k < len(out_names) else f"y{k}"
+        expr_str = _format_expr_readable(expr, precision=4)
+        val = prog_out_f[k] if k < len(prog_out_f) else 0.0
+        nn_val = nn_out[k] if k < len(nn_out) else 0.0
+        formula_trace.append(
+            {
+                "output_index": k,
+                "output_name": out_name,
+                "expression": expr_str,
+                "formula": f"{out_name} = {expr_str}",
+                "value": val,
+                "nn_value": nn_val,
+            }
+        )
+
+    hidden_acts = model.hidden_activations(x_2d)
+    active_neurons: list[dict[str, Any]] = []
+    neuron_summary_parts: list[str] = []
+    for layer_idx, h_mat in enumerate(hidden_acts):
+        h_vec = h_mat[0]
+        active_idx = np.flatnonzero(h_vec > 0.0)
+        sorted_active = active_idx[np.argsort(h_vec[active_idx])[::-1]]
+        top_neurons = [
+            {
+                "index": int(j),
+                "neuron": int(j),
+                "value": float(h_vec[j]),
+            }
+            for j in sorted_active[:5]
+        ]
+        active_neurons.append(
+            {
+                "layer": int(layer_idx),
+                "active_count": len(active_idx),
+                "total_count": len(h_vec),
+                "top_neurons": top_neurons,
+            }
+        )
+        neuron_summary_parts.append(f"L{layer_idx} {len(active_idx)}/{len(h_vec)}")
+
+    rid = int(leaf.regime_id)
+    is_proven = bool(leaf_proven_map.get(rid, False)) if leaf_proven_map else False
+    badge = "PROVEN" if is_proven else "EMPIRICAL"
+
+    if guard_trace:
+        guard_steps = " -> ".join(
+            f"[{g['expression']} is {g['branch']} (margin={float(g['margin']):.4f})]"
+            for g in guard_trace
+        )
+        route_str = f"Guards {guard_steps} routed input to Regime #{rid} ({leaf.name}) [{badge}]."
+    else:
+        route_str = f"Single root Regime #{rid} ({leaf.name}) [{badge}]."
+
+    if formula_trace:
+        f0 = formula_trace[0]
+        out_str = (
+            f"Evaluated {f0['formula']} = {f0['value']:.4f} "
+            f"(ONNX: {f0['nn_value']:.4f}, max |err|={abs_err:.4e})."
+        )
+    else:
+        out_str = f"Max |err|={abs_err:.4e}."
+
+    if program.task_type == TaskType.CLASSIFICATION and program_class is not None:
+        cls_names = program.domain.class_names
+        p_label = cls_names[program_class] if 0 <= program_class < len(cls_names) else str(program_class)
+        out_str += f" Predicted class: {p_label} (id={program_class}, NN id={nn_class})."
+
+    if neuron_summary_parts:
+        out_str += f" Active hidden neurons: {', '.join(neuron_summary_parts)}."
+
+    return DecisionExplanation(
+        x=x_list,
+        regime_id=rid,
+        regime_name=leaf.name,
+        regime_proven=is_proven,
+        guard_trace=guard_trace,
+        formula_trace=formula_trace,
+        nn_output=nn_out,
+        program_output=prog_out_f,
+        nn_class=nn_class,
+        program_class=program_class,
+        abs_error=abs_err,
+        active_neurons=active_neurons,
+        summary_text=f"{route_str} {out_str}",
+    )
+
+
+__all__ = [
+    "DenseLayer",
+    "LoadedModel",
+    "compute_regime_neuron_profiles",
+    "explain_decision",
+    "from_pytorch",
+    "load_onnx",
+]

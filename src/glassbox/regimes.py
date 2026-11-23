@@ -258,11 +258,20 @@ def _scan_regression_direction(
     parent_imp: float,
     min_samples: int,
     max_splits: int,
+    extra_threshold: float | None = None,
+    prefer_exact_threshold: bool = False,
 ) -> tuple[float, np.ndarray, float] | None:
     proj = X_node @ d_vec
     order = np.argsort(proj, kind="mergesort")
     p_s = proj[order]
     positions = _candidate_split_positions(p_s, min_samples, max_splits)
+    pos_extra: int | None = None
+    if extra_threshold is not None:
+        pe = int(np.searchsorted(p_s, extra_threshold, side="right"))
+        if min_samples <= pe <= len(p_s) - min_samples and p_s[pe - 1] < p_s[pe]:
+            pos_extra = pe
+            if pe not in positions:
+                positions.append(pe)
     if not positions:
         return None
 
@@ -297,9 +306,21 @@ def _scan_regression_direction(
             sse_r = float(np.sum((wy2_tot - wy2_prefix[pos - 1]) - (sum_yr * sum_yr) / w_r))
             child_imp = max(0.0, sse_l + sse_r) / (w_tot * k_out)
             gain = parent_imp - child_imp
+            is_exact = (
+                pos_extra is not None
+                and pos == pos_extra
+                and extra_threshold is not None
+                and float(p_s[pos - 1]) <= float(extra_threshold) <= float(p_s[pos])
+            )
+            if is_exact and prefer_exact_threshold and gain > 0.0:
+                gain *= 1.0 + 1e-4
             if gain > best_gain:
                 best_gain = gain
-                best_t = 0.5 * (float(p_s[pos - 1]) + float(p_s[pos]))
+                best_t = (
+                    float(extra_threshold)
+                    if is_exact and extra_threshold is not None
+                    else 0.5 * (float(p_s[pos - 1]) + float(p_s[pos]))
+                )
         if best_gain <= 1e-12:
             return None
         return w_tot * best_gain, d_vec, -best_t
@@ -345,9 +366,21 @@ def _scan_regression_direction(
         sse_r = max(0.0, y2_r - float(np.sum(beta_r * xty_r)))
         child_imp = (sse_l + sse_r) / (w_tot * k_out)
         gain = parent_imp - child_imp
+        is_exact = (
+            pos_extra is not None
+            and pos == pos_extra
+            and extra_threshold is not None
+            and float(p_s[pos - 1]) <= float(extra_threshold) <= float(p_s[pos])
+        )
+        if is_exact and prefer_exact_threshold and gain > 0.0:
+            gain *= 1.0 + 1e-4
         if gain > best_gain:
             best_gain = gain
-            best_t = 0.5 * (float(p_s[pos - 1]) + float(p_s[pos]))
+            best_t = (
+                float(extra_threshold)
+                if is_exact and extra_threshold is not None
+                else 0.5 * (float(p_s[pos - 1]) + float(p_s[pos]))
+            )
 
     if best_gain <= 1e-12:
         return None
@@ -363,6 +396,7 @@ def _scan_classification_direction(
     min_samples: int,
     max_splits: int,
     extra_threshold: float | None = None,
+    prefer_exact_threshold: bool = False,
 ) -> tuple[float, np.ndarray, float] | None:
     proj = X_node @ d_vec
     order = np.argsort(proj, kind="mergesort")
@@ -385,14 +419,13 @@ def _scan_classification_direction(
     w_prefix = np.cumsum(w_s)
 
     positions = _candidate_split_positions(p_s, min_samples, max_splits)
+    pos_extra: int | None = None
     if extra_threshold is not None:
-        pos_extra = int(np.searchsorted(p_s, extra_threshold, side="right"))
-        if (
-            min_samples <= pos_extra <= len(p_s) - min_samples
-            and pos_extra not in positions
-            and p_s[pos_extra - 1] < p_s[pos_extra]
-        ):
-            positions.append(pos_extra)
+        pe = int(np.searchsorted(p_s, extra_threshold, side="right"))
+        if min_samples <= pe <= len(p_s) - min_samples and p_s[pe - 1] < p_s[pe]:
+            pos_extra = pe
+            if pe not in positions:
+                positions.append(pe)
 
     if not positions:
         return None
@@ -410,9 +443,21 @@ def _scan_classification_direction(
         gini_r = 1.0 - float(np.sum((c_r / w_r) ** 2))
         child_gini = (w_l * gini_l + w_r * gini_r) / w_tot
         gain = parent_gini - child_gini
+        is_exact = (
+            pos_extra is not None
+            and pos == pos_extra
+            and extra_threshold is not None
+            and float(p_s[pos - 1]) <= float(extra_threshold) <= float(p_s[pos])
+        )
+        if is_exact and prefer_exact_threshold and gain > 0.0:
+            gain *= 1.0 + 1e-4
         if gain > best_gain:
             best_gain = gain
-            best_t = 0.5 * (float(p_s[pos - 1]) + float(p_s[pos]))
+            best_t = (
+                float(extra_threshold)
+                if is_exact and extra_threshold is not None
+                else 0.5 * (float(p_s[pos - 1]) + float(p_s[pos]))
+            )
 
     if best_gain <= 1e-12:
         return None
@@ -577,6 +622,87 @@ def _gather_candidate_directions(
     return candidates
 
 
+def _extract_exact_relu_hyperplanes(
+    model: LoadedModel | None,
+    X_node: np.ndarray,
+    w_node: np.ndarray,
+) -> list[tuple[np.ndarray, float]]:
+    """Extract normalized exact Layer-1 ReLU hyperplanes and local effective hyperplanes."""
+    if model is None:
+        return []
+    layers = model.extract_mlp_layers()
+    if not layers or len(layers) < 2 or layers[0].activation != "Relu":
+        return []
+
+    hyperplanes: list[tuple[np.ndarray, float]] = []
+    layer0 = layers[0]
+    d = layer0.weight.shape[1]
+
+    def _add_hp(w_raw: np.ndarray, b_raw: float) -> None:
+        w_clean = np.asarray(w_raw, dtype=np.float64).copy()
+        w_clean[np.abs(w_clean) <= 1e-12] = 0.0
+        norm = float(np.linalg.norm(w_clean))
+        if norm > 1e-12:
+            hyperplanes.append((w_clean / norm, -float(b_raw) / norm))
+
+    # 1. Exact Layer-1 neuron hyperplanes: w_j . x + b_j = 0
+    for j in range(layer0.weight.shape[0]):
+        _add_hp(layer0.weight[j], float(layer0.bias[j]))
+
+    # 2. Local effective Layer-2 ReLU & output decision hyperplanes at node centroid.
+    if len(X_node) >= 2:
+        w_sum = float(w_node.sum())
+        x_ref = (w_node[:, None] * X_node).sum(axis=0) / w_sum if w_sum > _EPS else X_node.mean(axis=0)
+        z0 = X_node @ layer0.weight.T + layer0.bias
+        m0_maj = (np.mean(z0 > 0.0, axis=0) >= 0.5).astype(np.float64)
+        m0_ref = ((x_ref @ layer0.weight.T + layer0.bias) > 0.0).astype(np.float64)
+
+        seen_masks: list[np.ndarray] = [m0_ref]
+        if not np.array_equal(m0_maj, m0_ref):
+            seen_masks.append(m0_maj)
+
+        if len(layers) >= 3 and layers[1].activation == "Relu":
+            layer1 = layers[1]
+            for m0 in seen_masks:
+                w_eff1 = layer1.weight @ (m0[:, None] * layer0.weight)
+                b_eff1 = layer1.weight @ (m0 * layer0.bias) + layer1.bias
+                for k in range(w_eff1.shape[0]):
+                    _add_hp(w_eff1[k], float(b_eff1[k]))
+
+        # Local end-to-end effective linear map for output decision boundaries
+        w_cur = np.eye(d, dtype=np.float64)
+        b_cur = np.zeros((d,), dtype=np.float64)
+        h_cur = x_ref.copy()
+        all_relu = True
+        for hl in layers[:-1]:
+            if hl.activation not in ("Relu", "Identity"):
+                all_relu = False
+                break
+            z = h_cur @ hl.weight.T + hl.bias
+            if hl.activation == "Relu":
+                m = (z > 0.0).astype(np.float64)
+                w_cur = (m[:, None] * hl.weight) @ w_cur
+                b_cur = (m[:, None] * hl.weight) @ b_cur + (m * hl.bias)
+                h_cur = np.maximum(0.0, z)
+            else:
+                w_cur = hl.weight @ w_cur
+                b_cur = hl.weight @ b_cur + hl.bias
+                h_cur = z
+        if all_relu:
+            out_l = layers[-1]
+            w_out = out_l.weight @ w_cur
+            b_out = out_l.weight @ b_cur + out_l.bias
+            n_out = w_out.shape[0]
+            if n_out == 1:
+                _add_hp(w_out[0], float(b_out[0]))
+            elif n_out <= 4:
+                for c1 in range(n_out):
+                    for c2 in range(c1 + 1, n_out):
+                        _add_hp(w_out[c1] - w_out[c2], float(b_out[c1] - b_out[c2]))
+
+    return hyperplanes
+
+
 def _find_best_split(
     X: np.ndarray,
     Y: np.ndarray,
@@ -587,6 +713,7 @@ def _find_best_split(
     task_type: TaskType,
     min_samples: int,
     seed: int,
+    model: LoadedModel | None = None,
 ) -> tuple[float, LinearGuard, np.ndarray, np.ndarray] | None:
     if len(idx) < 2 * min_samples:
         return None
@@ -599,12 +726,17 @@ def _find_best_split(
     if parent_imp <= 1e-12:
         return None
 
-    candidates = _gather_candidate_directions(
+    heur_candidates = _gather_candidate_directions(
         X_node, Y_node, y_cls_node, w_node, task_type, seed
     )
+    relu_candidates = _extract_exact_relu_hyperplanes(model, X_node, w_node)
 
-    best: tuple[float, np.ndarray, float] | None = None
-    for idx_cand, (d_vec, extra_t) in enumerate(candidates):
+    all_candidates: list[tuple[np.ndarray, float | None, bool]] = [
+        (d_vec, extra_t, False) for d_vec, extra_t in heur_candidates
+    ] + [(d_vec, t_exact, True) for d_vec, t_exact in relu_candidates]
+
+    best: tuple[float, np.ndarray, float, bool] | None = None
+    for idx_cand, (d_vec, extra_t, is_relu) in enumerate(all_candidates):
         max_splits = 24 if idx_cand < X.shape[1] else 16
         if task_type == TaskType.CLASSIFICATION and y_cls_node is not None:
             res = _scan_classification_direction(
@@ -616,6 +748,7 @@ def _find_best_split(
                 min_samples,
                 max_splits,
                 extra_threshold=extra_t,
+                prefer_exact_threshold=is_relu,
             )
         else:
             res = _scan_regression_direction(
@@ -626,15 +759,18 @@ def _find_best_split(
                 parent_imp,
                 min_samples,
                 max_splits,
+                extra_threshold=extra_t,
+                prefer_exact_threshold=is_relu,
             )
         if res is not None and (best is None or res[0] > best[0]):
-            best = res
+            best = (res[0], res[1], res[2], is_relu)
 
     if best is None:
         return None
 
-    score, w_dir, bias = best
-    guard = _make_sparse_guard(w_dir, bias, feature_names)
+    score, w_dir, bias, is_relu = best
+    max_active = X.shape[1] if is_relu else _MAX_ACTIVE_FEATURES
+    guard = _make_sparse_guard(w_dir, bias, feature_names, max_active=max_active)
     mask = _eval_guard_mask(guard, X_node)
     left_idx = idx[mask]
     right_idx = idx[~mask]
@@ -785,7 +921,16 @@ def _extract_oblique_tree(
     heap: list[tuple[float, int]] = []
     if max_depth > 0 and max_regimes > 1:
         root_split = _find_best_split(
-            X, Y, y_cls, w, root_leaf.indices, feature_names, split_task, min_samples, config.seed
+            X,
+            Y,
+            y_cls,
+            w,
+            root_leaf.indices,
+            feature_names,
+            split_task,
+            min_samples,
+            config.seed,
+            model=model,
         )
         if root_split is not None:
             root_leaf.split = root_split
@@ -822,6 +967,7 @@ def _extract_oblique_tree(
                     split_task,
                     min_samples,
                     config.seed,
+                    model=model,
                 )
                 if csplit is not None:
                     child.split = csplit
@@ -1083,6 +1229,7 @@ def _split_failing_leaf(
     class_names: list[str],
     task_type: TaskType,
     seed: int,
+    model: LoadedModel | None = None,
 ) -> GuardNode | RegimeLeaf:
     d = X.shape[1]
     y_cls = _y_to_classes(Y) if task_type == TaskType.CLASSIFICATION else None
@@ -1124,25 +1271,77 @@ def _split_failing_leaf(
 
     guard: LinearGuard | None = None
 
-    # 1. Try sparse LogisticRegression separating high-residual/CE points from low-residual points.
-    X_aug = np.vstack([X_leaf, ce_points])
-    y_aug = np.concatenate([labels, np.ones((len(ce_points),), dtype=np.int64)])
-    w_aug = np.concatenate([w_leaf, np.full((len(ce_points),), float(np.mean(w_leaf)), dtype=np.float64)])
-    mean_aug = X_aug.mean(axis=0)
-    std_aug = np.maximum(X_aug.std(axis=0), 1e-6)
-    Xs_aug = (X_aug - mean_aug) / std_aug
+    # 1. First check exact ReLU hyperplanes that separate counterexamples from the leaf centroid.
+    relu_hps = _extract_exact_relu_hyperplanes(model, X_leaf, w_leaf)
+    if relu_hps:
+        leaf_centroid = X_leaf.mean(axis=0, keepdims=True)
+        parent_imp = _node_impurity(
+            X_leaf,
+            Y_leaf,
+            y_cls[idx] if y_cls is not None else None,
+            w_leaf,
+            task_type,
+        )
+        best_relu_gain = -1.0
+        for d_vec, t_exact in relu_hps:
+            cand_guard = _make_sparse_guard(
+                d_vec, -t_exact, feature_names, max_active=d
+            )
+            leaf_mask = _eval_guard_mask(cand_guard, X_leaf)
+            n_left = int(leaf_mask.sum())
+            if n_left == 0 or n_left == len(X_leaf):
+                continue
+            ce_mask = _eval_guard_mask(cand_guard, ce_points)
+            cent_mask = bool(_eval_guard_mask(cand_guard, leaf_centroid)[0])
+            separates_ce = bool(np.any(ce_mask != cent_mask))
+            w_l = float(w_leaf[leaf_mask].sum())
+            w_r = float(w_leaf[~leaf_mask].sum())
+            w_tot = w_l + w_r
+            if w_l <= _EPS or w_r <= _EPS:
+                continue
+            imp_l = _node_impurity(
+                X_leaf[leaf_mask],
+                Y_leaf[leaf_mask],
+                y_cls[idx][leaf_mask] if y_cls is not None else None,
+                w_leaf[leaf_mask],
+                task_type,
+            )
+            imp_r = _node_impurity(
+                X_leaf[~leaf_mask],
+                Y_leaf[~leaf_mask],
+                y_cls[idx][~leaf_mask] if y_cls is not None else None,
+                w_leaf[~leaf_mask],
+                task_type,
+            )
+            gain = parent_imp - (w_l * imp_l + w_r * imp_r) / w_tot
+            if separates_ce:
+                gain = max(gain, 0.0) + 1e-3 * (parent_imp + 1e-3)
+            if gain > best_relu_gain and gain > 0.0:
+                best_relu_gain = gain
+                guard = cand_guard
 
-    lr_cand = _fit_sparse_classifier_direction(
-        X_aug, Xs_aug, y_aug, w_aug, std_aug, seed, use_svc=False
-    )
-    if lr_cand is not None:
-        w_dir, t_val = lr_cand
-        cand_guard = _make_sparse_guard(w_dir, -t_val, feature_names, scales=std_aug)
-        mask = _eval_guard_mask(cand_guard, X_leaf)
-        if 0 < int(mask.sum()) < len(X_leaf):
-            guard = cand_guard
+    # 2. Try sparse LogisticRegression separating high-residual/CE points from low-residual points.
+    if guard is None:
+        X_aug = np.vstack([X_leaf, ce_points])
+        y_aug = np.concatenate([labels, np.ones((len(ce_points),), dtype=np.int64)])
+        w_aug = np.concatenate(
+            [w_leaf, np.full((len(ce_points),), float(np.mean(w_leaf)), dtype=np.float64)]
+        )
+        mean_aug = X_aug.mean(axis=0)
+        std_aug = np.maximum(X_aug.std(axis=0), 1e-6)
+        Xs_aug = (X_aug - mean_aug) / std_aug
 
-    # 2. Fallback/comparison with best impurity-reducing split with min_samples=1.
+        lr_cand = _fit_sparse_classifier_direction(
+            X_aug, Xs_aug, y_aug, w_aug, std_aug, seed, use_svc=False
+        )
+        if lr_cand is not None:
+            w_dir, t_val = lr_cand
+            cand_guard = _make_sparse_guard(w_dir, -t_val, feature_names, scales=std_aug)
+            mask = _eval_guard_mask(cand_guard, X_leaf)
+            if 0 < int(mask.sum()) < len(X_leaf):
+                guard = cand_guard
+
+    # 3. Fallback/comparison with best impurity-reducing split with min_samples=1.
     if guard is None:
         split = _find_best_split(
             X,
@@ -1154,6 +1353,7 @@ def _split_failing_leaf(
             task_type,
             min_samples=1,
             seed=seed,
+            model=model,
         )
         if split is not None:
             guard = split[1]
@@ -1254,6 +1454,7 @@ def refine_regime_around_counterexamples(
                 class_names,
                 task_type,
                 config.seed,
+                model=model,
             )
         return GuardNode(
             guard=node.guard,

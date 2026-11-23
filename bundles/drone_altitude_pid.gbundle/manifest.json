@@ -1,0 +1,38 @@
+{
+  "schema_version": "2.0.0",
+  "created_at": "2026-11-23T09:36:10.064998Z",
+  "model_name": "drone_altitude_pid",
+  "files": {
+    "model.onnx": "93dde505903975a0c4bc6299a0bc2720a199399fdec2ba9ca484fcb1f2d7624d",
+    "program.ir.json": "4e0b7ed34d4145aecf49c2cacc6344c91df41e5796d6280aca98dc591637998d",
+    "certificate.json": "dc36a004113446d06360c630591ab3fd615b1644df5c4f738d952f8009fe191a",
+    "code/model.c": "d310d552192a85d954a37b5f3b407999c51f90454e8c533cb40a73576ed50cbb",
+    "code/model.h": "5be07474de0b1c30527ca5cab0cfa02c369fbff21c498489fe04b46398867e96",
+    "code/model.rs": "b3b7c5ddd292ab167fed75235b0bc92a754c6fda345ff26552507ffd0f8bfa57",
+    "code/model.py": "bf20430379a7c2779a9d39f5bbad5fcfb447812b9460770ebeab7ca612b1f960"
+  },
+  "tool_versions": {
+    "glassbox": "0.2.0",
+    "python": "3.11.9",
+    "z3": "5.4.1",
+    "onnxruntime": "1.32.0",
+    "numpy": "2.3.2",
+    "scipy": "1.17.1"
+  },
+  "config": {
+    "task_type": "regression",
+    "max_regimes": 8,
+    "max_depth": 4,
+    "regime_method": "oblique_tree",
+    "max_degree": 1,
+    "tolerance_eps": 0.05,
+    "classification_margin": 0.05,
+    "target_agreement": 0.99,
+    "max_cegis_iters": 6,
+    "initial_samples": 2000,
+    "verify_smt": true,
+    "smt_timeout_s": 6.0,
+    "adversarial_restarts": 24,
+    "seed": 42
+  }
+}

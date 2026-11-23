@@ -1,4 +1,4 @@
-"""Tests for GlassBox CLI commands and FastAPI Studio server endpoints."""
+"""Tests for GlassBox v0.2.0 CLI commands and FastAPI Studio server endpoints."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def test_api_health_and_models(tmp_path: Path) -> None:
     assert models[0]["metadata"]["is_piecewise_linear"] is True
 
 
-def test_api_decompile_slice_and_download(tmp_path: Path) -> None:
+def test_api_decompile_explain_slice_and_download(tmp_path: Path) -> None:
     models_dir = tmp_path / "models"
     models_dir.mkdir()
     _export_tiny_relu_model(models_dir, "tiny_ctrl")
@@ -94,10 +94,29 @@ def test_api_decompile_slice_and_download(tmp_path: Path) -> None:
     run_id = dec["run_id"]
     assert "c" in dec["code"]
     assert "rust" in dec["code"]
+    assert "regime_neuron_profiles" in dec
+    assert "sample_explanations" in dec
 
     res_run = client.get(f"/api/runs/{run_id}")
     assert res_run.status_code == 200
-    assert res_run.json()["run_id"] == run_id
+    run_body = res_run.json()
+    assert run_body["run_id"] == run_id
+    assert "certificate" in run_body
+
+    res_explain = client.post(
+        "/api/explain",
+        json={"run_id": run_id, "x": [0.25, -0.25]},
+    )
+    assert res_explain.status_code == 200, res_explain.text
+    exp = res_explain.json()
+    assert exp["x"] == [0.25, -0.25]
+    assert "regime_id" in exp
+    assert "guard_trace" in exp
+    assert "summary_text" in exp
+
+    res_bundle = client.get(f"/api/runs/{run_id}/bundle")
+    assert res_bundle.status_code == 200
+    assert res_bundle.json()["run_id"] == run_id
 
     res_slice = client.post(
         "/api/slice",
@@ -189,7 +208,7 @@ def test_api_stream_sse(tmp_path: Path) -> None:
     assert "event: complete" in text
 
 
-def test_cli_inspect_and_decompile_smoke(tmp_path: Path) -> None:
+def test_cli_inspect_decompile_bundle_and_verify(tmp_path: Path) -> None:
     onnx_path = _export_tiny_relu_model(tmp_path, "cli_ctrl")
     out_dir = tmp_path / "out"
     runner = CliRunner()
@@ -210,8 +229,9 @@ def test_cli_inspect_and_decompile_smoke(tmp_path: Path) -> None:
             "--max-regimes",
             "6",
             "--eps",
-            "0.1",
+            "0.25",
             "--no-bench",
+            "--bundle",
         ],
     )
     assert res_dec.exit_code == 0, res_dec.output
@@ -227,3 +247,9 @@ def test_cli_inspect_and_decompile_smoke(tmp_path: Path) -> None:
         assert (out_dir / fname).is_file(), f"Missing {fname}"
     cert = json.loads((out_dir / "cli_ctrl.certificate.json").read_text(encoding="utf-8"))
     assert cert["model_name"] == "cli_ctrl"
+
+    bundle_dir = out_dir / "cli_ctrl.gbundle"
+    assert bundle_dir.is_dir()
+    res_verify = runner.invoke(cli_app, ["verify", str(bundle_dir)])
+    assert res_verify.exit_code == 0, res_verify.output
+    assert "VERIFIED_REPRODUCED" in res_verify.output

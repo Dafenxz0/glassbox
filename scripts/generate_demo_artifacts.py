@@ -1,4 +1,4 @@
-"""Generate real pre-baked GlassBox demo artifacts and benchmark summaries."""
+"""Generate real pre-baked GlassBox v0.2.0 demo artifacts, Pareto frontiers, and bundles."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from glassbox.certificate import verify_artifact_bundle, write_artifact_bundle
 from glassbox.cli import run_decompile_pipeline
 from glassbox.loader import load_onnx
 from glassbox.server import compute_slice_payload
@@ -19,7 +20,9 @@ def main() -> None:
     models_dir = root / "models"
     demo_dir = root / "studio" / "demo-data"
     runs_dir = demo_dir / "runs"
+    bundles_dir = root / "bundles"
     runs_dir.mkdir(parents=True, exist_ok=True)
+    bundles_dir.mkdir(parents=True, exist_ok=True)
 
     train_zoo(models_dir, force=False)
 
@@ -57,10 +60,55 @@ def main() -> None:
                 tolerance_eps=0.05,
                 verify_smt=pwl,
             )
+
         if mid == "drone_altitude_pid":
             cfg = cfg.model_copy(update={"tolerance_eps": 0.05, "smt_timeout_s": 6.0})
+        elif mid == "cartpole_policy":
+            cfg = cfg.model_copy(
+                update={
+                    "max_regimes": 16,
+                    "max_depth": 4,
+                    "smt_timeout_s": 8.0,
+                    "classification_margin": 0.05,
+                }
+            )
 
-        result = run_decompile_pipeline(loaded, cfg, run_benchmarks_flag=True, run_id=mid)
+        result = run_decompile_pipeline(
+            loaded,
+            cfg,
+            run_benchmarks_flag=True,
+            run_pareto_flag=True,
+            pareto_budgets=(2, 4, 8, 16),
+            run_id=mid,
+        )
+
+        # If cartpole_policy didn't reach PROVEN_REAL_MARGIN at margin=0.05, check margin=0.15
+        if mid == "cartpole_policy" and not result.certificate.status.is_proven:
+            alt_cfg = cfg.model_copy(update={"classification_margin": 0.15})
+            alt_res = run_decompile_pipeline(
+                loaded,
+                alt_cfg,
+                run_benchmarks_flag=True,
+                run_pareto_flag=True,
+                pareto_budgets=(2, 4, 8, 16),
+                run_id=mid,
+            )
+            if alt_res.certificate.status.is_proven or (
+                alt_res.certificate.agreement_rate >= result.certificate.agreement_rate
+            ):
+                cfg = alt_cfg
+                result = alt_res
+
+        if mid == "drone_altitude_pid":
+            bundle_dir = write_artifact_bundle(
+                result, onnx_path, bundles_dir / f"{mid}.gbundle"
+            )
+            report = verify_artifact_bundle(bundle_dir, recompute_smt=True, smt_timeout_s=6.0)
+            if report.verdict != "VERIFIED_REPRODUCED":
+                raise RuntimeError(
+                    f"Artifact bundle self-verification failed for {mid}: {report}"
+                )
+
         default_slice = compute_slice_payload(
             loaded,
             result,
@@ -90,6 +138,8 @@ def main() -> None:
         index_runs[mid] = f"runs/{mid}.json"
 
         cert = result.certificate
+        rap = cert.real_arithmetic_proof
+        nda = cert.numerical_deployment_assurance
         summary_models.append(
             {
                 "id": mid,
@@ -108,6 +158,9 @@ def main() -> None:
                 "regime_count": len(result.program.leaves()),
                 "ast_nodes": result.program.ast_node_count(),
                 "total_counterexamples_found": cert.total_counterexamples_found,
+                "real_arithmetic_proof": rap.model_dump(mode="json") if rap else None,
+                "numerical_deployment_assurance": nda.model_dump(mode="json") if nda else None,
+                "pareto_candidates": len(result.pareto_frontier),
                 "benchmarks": [b.model_dump(mode="json") for b in result.benchmarks],
             }
         )
@@ -129,7 +182,7 @@ def main() -> None:
         ),
         encoding="utf-8",
     )
-    print(f"Generated demo artifacts for {len(model_ids)} models in {demo_dir}")
+    print(f"Generated v0.2.0 demo artifacts for {len(model_ids)} models in {demo_dir}")
 
 
 if __name__ == "__main__":

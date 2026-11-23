@@ -1,0 +1,767 @@
+{
+  "name": "drone_altitude_pid_decompiled",
+  "task_type": "regression",
+  "domain": {
+    "feature_names": [
+      "alt_error",
+      "vert_vel",
+      "battery_v"
+    ],
+    "lower_bounds": [
+      -3.0,
+      -3.0,
+      10.5
+    ],
+    "upper_bounds": [
+      3.0,
+      3.0,
+      12.6
+    ],
+    "output_names": [
+      "thrust_cmd"
+    ],
+    "task_type": "regression",
+    "class_names": []
+  },
+  "root": {
+    "node_type": "guard",
+    "guard": {
+      "weights": [
+        -0.7496235109209943,
+        0.641700556052102,
+        0.16212645754751145
+      ],
+      "bias": -0.7849188548252009,
+      "feature_names": [
+        "alt_error",
+        "vert_vel",
+        "battery_v"
+      ],
+      "op": "<="
+    },
+    "true_branch": {
+      "node_type": "guard",
+      "guard": {
+        "weights": [
+          0.6965590456690253,
+          -0.6606421181579791,
+          -0.27992407472812253
+        ],
+        "bias": 1.690803498089037,
+        "feature_names": [
+          "alt_error",
+          "vert_vel",
+          "battery_v"
+        ],
+        "op": "<="
+      },
+      "true_branch": {
+        "node_type": "leaf",
+        "regime_id": 0,
+        "name": "regime_0_alt_error_lo",
+        "description": "-0.750*alt_error + 0.642*vert_vel + 0.162*battery_v - 0.785 <= 0 AND 0.697*alt_error - 0.661*vert_vel - 0.280*battery_v + 1.691 <= 0 (samples=166, local_err=0.005514)",
+        "output_exprs": [
+          {
+            "kind": "binary",
+            "op": "add",
+            "left": {
+              "kind": "binary",
+              "op": "sub",
+              "left": {
+                "kind": "binary",
+                "op": "sub",
+                "left": {
+                  "kind": "binary",
+                  "op": "mul",
+                  "left": {
+                    "kind": "const",
+                    "value": 0.17200909175059864
+                  },
+                  "right": {
+                    "kind": "var",
+                    "index": 0,
+                    "name": "alt_error"
+                  }
+                },
+                "right": {
+                  "kind": "binary",
+                  "op": "mul",
+                  "left": {
+                    "kind": "const",
+                    "value": 0.13345172708318423
+                  },
+                  "right": {
+                    "kind": "var",
+                    "index": 1,
+                    "name": "vert_vel"
+                  }
+                }
+              },
+              "right": {
+                "kind": "binary",
+                "op": "mul",
+                "left": {
+                  "kind": "const",
+                  "value": 0.04379433639506888
+                },
+                "right": {
+                  "kind": "var",
+                  "index": 2,
+                  "name": "battery_v"
+                }
+              }
+            },
+            "right": {
+              "kind": "const",
+              "value": 1.0627682490804946
+            }
+          }
+        ],
+        "class_id": null,
+        "class_name": null,
+        "sample_count": 166,
+        "local_error": 0.005514333422422201
+      },
+      "false_branch": {
+        "node_type": "guard",
+        "guard": {
+          "weights": [
+            -0.3502014406505409,
+            -0.5163416792325125,
+            -0.7815050999536952
+          ],
+          "bias": 9.153238649901438,
+          "feature_names": [
+            "alt_error",
+            "vert_vel",
+            "battery_v"
+          ],
+          "op": "<="
+        },
+        "true_branch": {
+          "node_type": "leaf",
+          "regime_id": 1,
+          "name": "regime_1_battery_v_hi",
+          "description": "-0.750*alt_error + 0.642*vert_vel + 0.162*battery_v - 0.785 <= 0 AND 0.697*alt_error - 0.661*vert_vel - 0.280*battery_v + 1.691 > 0 AND -0.350*alt_error - 0.516*vert_vel - 0.782*battery_v + 9.153 <= 0 (samples=116, local_err=0.000126)",
+          "output_exprs": [
+            {
+              "kind": "binary",
+              "op": "add",
+              "left": {
+                "kind": "binary",
+                "op": "sub",
+                "left": {
+                  "kind": "binary",
+                  "op": "sub",
+                  "left": {
+                    "kind": "binary",
+                    "op": "mul",
+                    "left": {
+                      "kind": "const",
+                      "value": 0.07956793767872858
+                    },
+                    "right": {
+                      "kind": "var",
+                      "index": 0,
+                      "name": "alt_error"
+                    }
+                  },
+                  "right": {
+                    "kind": "binary",
+                    "op": "mul",
+                    "left": {
+                      "kind": "const",
+                      "value": 0.043340847288694605
+                    },
+                    "right": {
+                      "kind": "var",
+                      "index": 1,
+                      "name": "vert_vel"
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "binary",
+                  "op": "mul",
+                  "left": {
+                    "kind": "const",
+                    "value": 0.00582714322311296
+                  },
+                  "right": {
+                    "kind": "var",
+                    "index": 2,
+                    "name": "battery_v"
+                  }
+                }
+              },
+              "right": {
+                "kind": "const",
+                "value": 0.8182099389682276
+              }
+            }
+          ],
+          "class_id": null,
+          "class_name": null,
+          "sample_count": 116,
+          "local_error": 0.00012598151680811318
+        },
+        "false_branch": {
+          "node_type": "leaf",
+          "regime_id": 2,
+          "name": "regime_2_battery_v_lo",
+          "description": "-0.750*alt_error + 0.642*vert_vel + 0.162*battery_v - 0.785 <= 0 AND 0.697*alt_error - 0.661*vert_vel - 0.280*battery_v + 1.691 > 0 AND -0.350*alt_error - 0.516*vert_vel - 0.782*battery_v + 9.153 > 0 (samples=272, local_err=0.001051)",
+          "output_exprs": [
+            {
+              "kind": "binary",
+              "op": "add",
+              "left": {
+                "kind": "binary",
+                "op": "sub",
+                "left": {
+                  "kind": "binary",
+                  "op": "sub",
+                  "left": {
+                    "kind": "binary",
+                    "op": "mul",
+                    "left": {
+                      "kind": "const",
+                      "value": 0.07355743737539397
+                    },
+                    "right": {
+                      "kind": "var",
+                      "index": 0,
+                      "name": "alt_error"
+                    }
+                  },
+                  "right": {
+                    "kind": "binary",
+                    "op": "mul",
+                    "left": {
+                      "kind": "const",
+                      "value": 0.05275929639506308
+                    },
+                    "right": {
+                      "kind": "var",
+                      "index": 1,
+                      "name": "vert_vel"
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "binary",
+                  "op": "mul",
+                  "left": {
+                    "kind": "const",
+                    "value": 0.01979306104424567
+                  },
+                  "right": {
+                    "kind": "var",
+                    "index": 2,
+                    "name": "battery_v"
+                  }
+                }
+              },
+              "right": {
+                "kind": "const",
+                "value": 0.9812294419757225
+              }
+            }
+          ],
+          "class_id": null,
+          "class_name": null,
+          "sample_count": 272,
+          "local_error": 0.0010508633918145625
+        }
+      }
+    },
+    "false_branch": {
+      "node_type": "guard",
+      "guard": {
+        "weights": [
+          0.7564568898300442,
+          -0.6172498407996899,
+          -0.216276692829842
+        ],
+        "bias": 4.738205072055088,
+        "feature_names": [
+          "alt_error",
+          "vert_vel",
+          "battery_v"
+        ],
+        "op": "<="
+      },
+      "true_branch": {
+        "node_type": "guard",
+        "guard": {
+          "weights": [
+            0.8164097194565793,
+            -0.5339587868722188,
+            -0.21991631112488683
+          ],
+          "bias": 4.813215067335492,
+          "feature_names": [
+            "alt_error",
+            "vert_vel",
+            "battery_v"
+          ],
+          "op": "<="
+        },
+        "true_branch": {
+          "node_type": "leaf",
+          "regime_id": 3,
+          "name": "regime_3_alt_error_lo",
+          "description": "-0.750*alt_error + 0.642*vert_vel + 0.162*battery_v - 0.785 > 0 AND 0.756*alt_error - 0.617*vert_vel - 0.216*battery_v + 4.738 <= 0 AND 0.816*alt_error - 0.534*vert_vel - 0.220*battery_v + 4.813 <= 0 (samples=205, local_err=0.002981)",
+          "output_exprs": [
+            {
+              "kind": "binary",
+              "op": "add",
+              "left": {
+                "kind": "binary",
+                "op": "add",
+                "left": {
+                  "kind": "binary",
+                  "op": "sub",
+                  "left": {
+                    "kind": "binary",
+                    "op": "mul",
+                    "left": {
+                      "kind": "const",
+                      "value": 0.0019157625035161527
+                    },
+                    "right": {
+                      "kind": "var",
+                      "index": 0,
+                      "name": "alt_error"
+                    }
+                  },
+                  "right": {
+                    "kind": "binary",
+                    "op": "mul",
+                    "left": {
+                      "kind": "const",
+                      "value": 0.0010577777091629447
+                    },
+                    "right": {
+                      "kind": "var",
+                      "index": 1,
+                      "name": "vert_vel"
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "binary",
+                  "op": "mul",
+                  "left": {
+                    "kind": "const",
+                    "value": 0.0008422472024253344
+                  },
+                  "right": {
+                    "kind": "var",
+                    "index": 2,
+                    "name": "battery_v"
+                  }
+                }
+              },
+              "right": {
+                "kind": "const",
+                "value": 0.007126717536679856
+              }
+            }
+          ],
+          "class_id": null,
+          "class_name": null,
+          "sample_count": 205,
+          "local_error": 0.0029811088711250307
+        },
+        "false_branch": {
+          "node_type": "leaf",
+          "regime_id": 4,
+          "name": "regime_4_alt_error_hi",
+          "description": "-0.750*alt_error + 0.642*vert_vel + 0.162*battery_v - 0.785 > 0 AND 0.756*alt_error - 0.617*vert_vel - 0.216*battery_v + 4.738 <= 0 AND 0.816*alt_error - 0.534*vert_vel - 0.220*battery_v + 4.813 > 0 (samples=38, local_err=0.00367)",
+          "output_exprs": [
+            {
+              "kind": "binary",
+              "op": "add",
+              "left": {
+                "kind": "binary",
+                "op": "sub",
+                "left": {
+                  "kind": "binary",
+                  "op": "sub",
+                  "left": {
+                    "kind": "binary",
+                    "op": "mul",
+                    "left": {
+                      "kind": "const",
+                      "value": 0.112831486947786
+                    },
+                    "right": {
+                      "kind": "var",
+                      "index": 0,
+                      "name": "alt_error"
+                    }
+                  },
+                  "right": {
+                    "kind": "binary",
+                    "op": "mul",
+                    "left": {
+                      "kind": "const",
+                      "value": 0.07997130647127797
+                    },
+                    "right": {
+                      "kind": "var",
+                      "index": 1,
+                      "name": "vert_vel"
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "binary",
+                  "op": "mul",
+                  "left": {
+                    "kind": "const",
+                    "value": 0.012408911167648145
+                  },
+                  "right": {
+                    "kind": "var",
+                    "index": 2,
+                    "name": "battery_v"
+                  }
+                }
+              },
+              "right": {
+                "kind": "const",
+                "value": 0.4930425078976419
+              }
+            }
+          ],
+          "class_id": null,
+          "class_name": null,
+          "sample_count": 38,
+          "local_error": 0.0036702417371324023
+        }
+      },
+      "false_branch": {
+        "node_type": "guard",
+        "guard": {
+          "weights": [
+            -0.3502014406505409,
+            -0.5163416792325125,
+            -0.7815050999536952
+          ],
+          "bias": 9.153238649901438,
+          "feature_names": [
+            "alt_error",
+            "vert_vel",
+            "battery_v"
+          ],
+          "op": "<="
+        },
+        "true_branch": {
+          "node_type": "guard",
+          "guard": {
+            "weights": [
+              0.4568155631117814,
+              -0.3302027034923322,
+              0.826005881277622
+            ],
+            "bias": -8.484854159232617,
+            "feature_names": [
+              "alt_error",
+              "vert_vel",
+              "battery_v"
+            ],
+            "op": "<="
+          },
+          "true_branch": {
+            "node_type": "leaf",
+            "regime_id": 5,
+            "name": "regime_5_battery_v_lo",
+            "description": "-0.750*alt_error + 0.642*vert_vel + 0.162*battery_v - 0.785 > 0 AND 0.756*alt_error - 0.617*vert_vel - 0.216*battery_v + 4.738 > 0 AND -0.350*alt_error - 0.516*vert_vel - 0.782*battery_v + 9.153 <= 0 AND 0.457*alt_error - 0.330*vert_vel + 0.826*battery_v - 8.485 <= 0 (samples=53, local_err=0.001237)",
+            "output_exprs": [
+              {
+                "kind": "binary",
+                "op": "add",
+                "left": {
+                  "kind": "binary",
+                  "op": "sub",
+                  "left": {
+                    "kind": "binary",
+                    "op": "sub",
+                    "left": {
+                      "kind": "binary",
+                      "op": "mul",
+                      "left": {
+                        "kind": "const",
+                        "value": 0.16991087825718212
+                      },
+                      "right": {
+                        "kind": "var",
+                        "index": 0,
+                        "name": "alt_error"
+                      }
+                    },
+                    "right": {
+                      "kind": "binary",
+                      "op": "mul",
+                      "left": {
+                        "kind": "const",
+                        "value": 0.12524755321297928
+                      },
+                      "right": {
+                        "kind": "var",
+                        "index": 1,
+                        "name": "vert_vel"
+                      }
+                    }
+                  },
+                  "right": {
+                    "kind": "binary",
+                    "op": "mul",
+                    "left": {
+                      "kind": "const",
+                      "value": 0.06300036021121212
+                    },
+                    "right": {
+                      "kind": "var",
+                      "index": 2,
+                      "name": "battery_v"
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "const",
+                  "value": 1.2213970920131891
+                }
+              }
+            ],
+            "class_id": null,
+            "class_name": null,
+            "sample_count": 53,
+            "local_error": 0.00123740853792842
+          },
+          "false_branch": {
+            "node_type": "leaf",
+            "regime_id": 6,
+            "name": "regime_6_battery_v_hi",
+            "description": "-0.750*alt_error + 0.642*vert_vel + 0.162*battery_v - 0.785 > 0 AND 0.756*alt_error - 0.617*vert_vel - 0.216*battery_v + 4.738 > 0 AND -0.350*alt_error - 0.516*vert_vel - 0.782*battery_v + 9.153 <= 0 AND 0.457*alt_error - 0.330*vert_vel + 0.826*battery_v - 8.485 > 0 (samples=565, local_err=0.007239)",
+            "output_exprs": [
+              {
+                "kind": "binary",
+                "op": "add",
+                "left": {
+                  "kind": "binary",
+                  "op": "sub",
+                  "left": {
+                    "kind": "binary",
+                    "op": "sub",
+                    "left": {
+                      "kind": "binary",
+                      "op": "mul",
+                      "left": {
+                        "kind": "const",
+                        "value": 0.18304643001845006
+                      },
+                      "right": {
+                        "kind": "var",
+                        "index": 0,
+                        "name": "alt_error"
+                      }
+                    },
+                    "right": {
+                      "kind": "binary",
+                      "op": "mul",
+                      "left": {
+                        "kind": "const",
+                        "value": 0.13137747182019102
+                      },
+                      "right": {
+                        "kind": "var",
+                        "index": 1,
+                        "name": "vert_vel"
+                      }
+                    }
+                  },
+                  "right": {
+                    "kind": "binary",
+                    "op": "mul",
+                    "left": {
+                      "kind": "const",
+                      "value": 0.03056412780793934
+                    },
+                    "right": {
+                      "kind": "var",
+                      "index": 2,
+                      "name": "battery_v"
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "const",
+                  "value": 0.8771354015394419
+                }
+              }
+            ],
+            "class_id": null,
+            "class_name": null,
+            "sample_count": 565,
+            "local_error": 0.0072392737987319435
+          }
+        },
+        "false_branch": {
+          "node_type": "guard",
+          "guard": {
+            "weights": [
+              0.4568155631117814,
+              -0.3302027034923322,
+              0.826005881277622
+            ],
+            "bias": -8.484854159232617,
+            "feature_names": [
+              "alt_error",
+              "vert_vel",
+              "battery_v"
+            ],
+            "op": "<="
+          },
+          "true_branch": {
+            "node_type": "leaf",
+            "regime_id": 7,
+            "name": "regime_7_battery_v_lo",
+            "description": "-0.750*alt_error + 0.642*vert_vel + 0.162*battery_v - 0.785 > 0 AND 0.756*alt_error - 0.617*vert_vel - 0.216*battery_v + 4.738 > 0 AND -0.350*alt_error - 0.516*vert_vel - 0.782*battery_v + 9.153 > 0 AND 0.457*alt_error - 0.330*vert_vel + 0.826*battery_v - 8.485 <= 0 (samples=143, local_err=6.291e-05)",
+            "output_exprs": [
+              {
+                "kind": "binary",
+                "op": "add",
+                "left": {
+                  "kind": "binary",
+                  "op": "sub",
+                  "left": {
+                    "kind": "binary",
+                    "op": "sub",
+                    "left": {
+                      "kind": "binary",
+                      "op": "mul",
+                      "left": {
+                        "kind": "const",
+                        "value": 0.16350309796675103
+                      },
+                      "right": {
+                        "kind": "var",
+                        "index": 0,
+                        "name": "alt_error"
+                      }
+                    },
+                    "right": {
+                      "kind": "binary",
+                      "op": "mul",
+                      "left": {
+                        "kind": "const",
+                        "value": 0.1349589018840315
+                      },
+                      "right": {
+                        "kind": "var",
+                        "index": 1,
+                        "name": "vert_vel"
+                      }
+                    }
+                  },
+                  "right": {
+                    "kind": "binary",
+                    "op": "mul",
+                    "left": {
+                      "kind": "const",
+                      "value": 0.08016935429785399
+                    },
+                    "right": {
+                      "kind": "var",
+                      "index": 2,
+                      "name": "battery_v"
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "const",
+                  "value": 1.4206134451813797
+                }
+              }
+            ],
+            "class_id": null,
+            "class_name": null,
+            "sample_count": 143,
+            "local_error": 0.00006291433510927053
+          },
+          "false_branch": {
+            "node_type": "leaf",
+            "regime_id": 8,
+            "name": "regime_8_battery_v_hi",
+            "description": "-0.750*alt_error + 0.642*vert_vel + 0.162*battery_v - 0.785 > 0 AND 0.756*alt_error - 0.617*vert_vel - 0.216*battery_v + 4.738 > 0 AND -0.350*alt_error - 0.516*vert_vel - 0.782*battery_v + 9.153 > 0 AND 0.457*alt_error - 0.330*vert_vel + 0.826*battery_v - 8.485 > 0 (samples=503, local_err=0.001293)",
+            "output_exprs": [
+              {
+                "kind": "binary",
+                "op": "add",
+                "left": {
+                  "kind": "binary",
+                  "op": "sub",
+                  "left": {
+                    "kind": "binary",
+                    "op": "sub",
+                    "left": {
+                      "kind": "binary",
+                      "op": "mul",
+                      "left": {
+                        "kind": "const",
+                        "value": 0.17919503764774455
+                      },
+                      "right": {
+                        "kind": "var",
+                        "index": 0,
+                        "name": "alt_error"
+                      }
+                    },
+                    "right": {
+                      "kind": "binary",
+                      "op": "mul",
+                      "left": {
+                        "kind": "const",
+                        "value": 0.14619990945821282
+                      },
+                      "right": {
+                        "kind": "var",
+                        "index": 1,
+                        "name": "vert_vel"
+                      }
+                    }
+                  },
+                  "right": {
+                    "kind": "binary",
+                    "op": "mul",
+                    "left": {
+                      "kind": "const",
+                      "value": 0.05109819014388644
+                    },
+                    "right": {
+                      "kind": "var",
+                      "index": 2,
+                      "name": "battery_v"
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "const",
+                  "value": 1.121805866212239
+                }
+              }
+            ],
+            "class_id": null,
+            "class_name": null,
+            "sample_count": 503,
+            "local_error": 0.0012926781278745135
+          }
+        }
+      }
+    }
+  },
+  "is_linear_ir": true,
+  "metadata": {}
+}

@@ -23,9 +23,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Verify C99 and Rust compilers
+      - name: Verify GCC, Clang, and Rust toolchains
         run: |
           gcc --version
+          clang --version
           rustc --version
 
       - name: Install GlassBox with dev dependencies
@@ -39,11 +40,14 @@ jobs:
       - name: Run pytest suite
         run: pytest -v
 
-      - name: Smoke-test ONNX decompilation and native C99/Rust compilation
+      - name: Cross-compiler C99 (GCC + Clang), Rust, and bundle verification smoke test
         run: |
           rm -rf /tmp/gb_out
-          glassbox decompile models/cartpole_policy.onnx --out /tmp/gb_out --targets c,rust,python
-          gcc -Wall -Wextra -Werror -std=c99 -O3 -DGLASSBOX_MAIN /tmp/gb_out/*.c -lm -o /tmp/gb_test
-          /tmp/gb_test
-          rustc --test -D warnings /tmp/gb_out/*.rs -o /tmp/gb_rs_test
+          glassbox decompile models/drone_altitude_pid.onnx --out /tmp/gb_out --targets c,rust,python --bundle
+          gcc -Wall -Wextra -Werror -std=c99 -O3 -DGLASSBOX_MAIN /tmp/gb_out/drone_altitude_pid.c -lm -o /tmp/gb_gcc_test
+          /tmp/gb_gcc_test
+          clang -Wall -Wextra -Werror -std=c99 -O3 -DGLASSBOX_MAIN /tmp/gb_out/drone_altitude_pid.c -lm -o /tmp/gb_clang_test
+          /tmp/gb_clang_test
+          rustc --test -D warnings /tmp/gb_out/drone_altitude_pid.rs -o /tmp/gb_rs_test
           /tmp/gb_rs_test
+          glassbox verify /tmp/gb_out/drone_altitude_pid.gbundle

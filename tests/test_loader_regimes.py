@@ -12,8 +12,15 @@ import torch
 from onnx import TensorProto, helper, numpy_helper
 from torch import nn
 
-from glassbox.ir import GuardNode, RegimeLeaf
-from glassbox.loader import DenseLayer, LoadedModel, from_pytorch, load_onnx
+from glassbox.ir import BinaryExpr, ConstExpr, DecompiledProgram, GuardNode, RegimeLeaf, VarExpr
+from glassbox.loader import (
+    DenseLayer,
+    LoadedModel,
+    compute_regime_neuron_profiles,
+    explain_decision,
+    from_pytorch,
+    load_onnx,
+)
 from glassbox.regimes import (
     RegimePartition,
     extract_regimes,
@@ -219,7 +226,8 @@ def _check_partition_invariants(
     def _walk_guards(node: GuardNode | RegimeLeaf, depth: int) -> int:
         if isinstance(node, RegimeLeaf):
             return depth
-        assert len(node.guard.active_terms()) <= 3
+        assert 1 <= len(node.guard.active_terms()) <= max(3, X.shape[1])
+        assert np.linalg.norm(node.guard.weights) == pytest.approx(1.0, abs=1e-6)
         return max(
             _walk_guards(node.true_branch, depth + 1),
             _walk_guards(node.false_branch, depth + 1),
@@ -368,3 +376,112 @@ def test_invalid_inputs_and_edge_cases(tmp_path: Path) -> None:
     cfg = DecompileConfig(regime_method="unknown_method")
     with pytest.raises(ValueError):
         extract_regimes(model, np.zeros((10, 2)), np.zeros((10, 2)), cfg)
+
+
+def test_exact_relu_hyperplane_split_recovery(tmp_path: Path) -> None:
+    # Single ReLU kink along 3*x0 - 4*x1 + 0.5 = 0 (unit normal [0.6, -0.8, 0.0], b = 0.1)
+    net = nn.Sequential(
+        nn.Linear(3, 1),
+        nn.ReLU(),
+        nn.Linear(1, 1),
+    )
+    with torch.no_grad():
+        net[0].weight.copy_(torch.tensor([[3.0, -4.0, 0.0]], dtype=torch.float32))
+        net[0].bias.copy_(torch.tensor([0.5], dtype=torch.float32))
+        net[2].weight.copy_(torch.tensor([[2.0]], dtype=torch.float32))
+        net[2].bias.copy_(torch.tensor([-1.0], dtype=torch.float32))
+
+    dom = DomainSpec(
+        feature_names=["x0", "x1", "x2"],
+        lower_bounds=[-1.0, -1.0, -1.0],
+        upper_bounds=[1.0, 1.0, 1.0],
+        output_names=["y0"],
+        task_type=TaskType.REGRESSION,
+    )
+    model = from_pytorch(net, dom, tmp_path / "kink.onnx")
+    rng = np.random.default_rng(77)
+    X = rng.uniform(-1.0, 1.0, size=(200, 3))
+    Y = model.predict(X)
+
+    cfg = DecompileConfig(max_regimes=2, max_depth=2, regime_method="oblique_tree", seed=77)
+    part = extract_regimes(model, X, Y, cfg)
+    assert isinstance(part.root, GuardNode)
+    guard = part.root.guard
+    # Guard is either +([0.6, -0.8, 0], 0.1) or -([0.6, -0.8, 0], 0.1)
+    w_arr = np.asarray(guard.weights, dtype=np.float64)
+    sign = 1.0 if w_arr[0] >= 0.0 else -1.0
+    assert np.allclose(sign * w_arr, np.array([0.6, -0.8, 0.0]), atol=1e-5)
+    assert sign * guard.bias == pytest.approx(0.1, abs=1e-5)
+    for leaf in part.leaves():
+        assert leaf.local_error < 1e-9
+
+
+def test_compute_regime_neuron_profiles_and_explain_decision(tmp_path: Path) -> None:
+    torch.manual_seed(17)
+    net = nn.Sequential(
+        nn.Linear(2, 4),
+        nn.ReLU(),
+        nn.Linear(4, 1),
+    )
+    dom = DomainSpec(
+        feature_names=["x0", "x1"],
+        lower_bounds=[-1.0, -1.0],
+        upper_bounds=[1.0, 1.0],
+        output_names=["y0"],
+        task_type=TaskType.REGRESSION,
+    )
+    model = from_pytorch(net, dom, tmp_path / "explain_net.onnx")
+    rng = np.random.default_rng(17)
+    X = rng.uniform(-1.0, 1.0, size=(120, 2))
+    Y = model.predict(X)
+
+    cfg = DecompileConfig(max_regimes=3, max_depth=2, regime_method="oblique_tree", seed=17)
+    part = extract_regimes(model, X, Y, cfg)
+    # Give leaf 0 a rich linear BinaryExpr to exercise formula_trace formatting
+    leaves = part.leaves()
+    leaves[0].output_exprs = [
+        BinaryExpr(
+            op="add",
+            left=BinaryExpr(op="mul", left=ConstExpr(value=1.5), right=VarExpr(index=0, name="x0")),
+            right=ConstExpr(value=0.25),
+        )
+    ]
+    prog = DecompiledProgram(
+        name="explain_prog",
+        task_type=TaskType.REGRESSION,
+        domain=dom,
+        root=part.root,
+    )
+
+    profiles = compute_regime_neuron_profiles(model, prog, X)
+    assert set(profiles.keys()) == {leaf.regime_id for leaf in leaves}
+    assert sum(p["sample_count"] for p in profiles.values()) == len(X)
+    for p in profiles.values():
+        if p["sample_count"] > 0:
+            assert len(p["mean_layer_activation_rates"]) == 1
+            assert len(p["layer_activation_rates"][0]) == 4
+            assert len(p["top_neurons"]) <= 5
+            assert all(
+                {"layer", "neuron", "activation_rate", "mean_value"} <= set(n.keys())
+                for n in p["top_neurons"]
+            )
+
+    sample_x = [0.25, -0.35]
+    _, routed_leaf, _ = prog.trace_one(sample_x)
+    expl = explain_decision(
+        model,
+        prog,
+        sample_x,
+        leaf_proven_map={routed_leaf.regime_id: True},
+    )
+    assert expl.x == pytest.approx(sample_x)
+    assert expl.regime_id == routed_leaf.regime_id
+    assert expl.regime_proven is True
+    assert len(expl.guard_trace) >= 1
+    assert len(expl.formula_trace) == 1
+    assert "y0 =" in expl.formula_trace[0]["formula"]
+    assert len(expl.active_neurons) == 1
+    assert expl.active_neurons[0]["total_count"] == 4
+    assert "[PROVEN]" in expl.summary_text
+    assert "Active hidden neurons: L0" in expl.summary_text
+

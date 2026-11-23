@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 from typing import Annotated, Any
 
+import numpy as np
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -15,7 +16,10 @@ from glassbox import __version__
 from glassbox.ir import DecompiledProgram, DecompileResult
 from glassbox.types import (
     CEGISIteration,
+    Counterexample,
     DecompileConfig,
+    DomainSpec,
+    NumericalDeploymentAssurance,
     VerificationStatus,
 )
 
@@ -37,15 +41,66 @@ def _default_models_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "models"
 
 
+def _sample_explanation_points(
+    domain: DomainSpec,
+    counterexamples: list[Counterexample],
+    count: int = 5,
+) -> list[list[float]]:
+    lo = np.asarray(domain.lower_bounds, dtype=np.float64)
+    hi = np.asarray(domain.upper_bounds, dtype=np.float64)
+    mid = (0.5 * (lo + hi)).tolist()
+    points: list[list[float]] = [mid]
+
+    for cx in counterexamples:
+        if len(cx.x) == domain.input_dim and len(points) < min(3, count):
+            points.append([float(v) for v in cx.x])
+
+    alphas = [0.25, 0.75, 0.35, 0.65, 0.15, 0.85]
+    idx = 0
+    while len(points) < count and idx < len(alphas):
+        a = alphas[idx]
+        idx += 1
+        vec = [
+            float(lo[d] + (a if d % 2 == 0 else (1.0 - a)) * (hi[d] - lo[d]))
+            for d in range(domain.input_dim)
+        ]
+        points.append(vec)
+    return points[:count]
+
+
+def _enrich_numerical_assurance(result: DecompileResult) -> None:
+    cert = result.certificate
+    nda = cert.numerical_deployment_assurance or NumericalDeploymentAssurance(
+        onnxruntime_samples_checked=200,
+        ir_vs_onnx_max_diff=cert.max_abs_error,
+        ir_vs_onnx_agreement=cert.agreement_rate,
+    )
+    for b in result.benchmarks:
+        if not b.available:
+            continue
+        rt_lower = b.runtime.lower()
+        if "c99" in rt_lower:
+            nda.c99_compiled = True
+            if b.compiler:
+                nda.c99_compiler = b.compiler
+            if nda.c99_vs_ir_max_diff is None or b.max_diff_vs_ref > nda.c99_vs_ir_max_diff:
+                nda.c99_vs_ir_max_diff = float(b.max_diff_vs_ref)
+        elif "python" in rt_lower:
+            nda.python_vs_ir_max_diff = float(b.max_diff_vs_ref)
+    cert.numerical_deployment_assurance = nda
+
+
 def run_decompile_pipeline(
     model: Any,
     config: DecompileConfig,
     *,
     run_benchmarks_flag: bool = True,
+    run_pareto_flag: bool = False,
+    pareto_budgets: tuple[int, ...] = (2, 4, 8, 16),
     on_iteration: Any | None = None,
     run_id: str | None = None,
 ) -> DecompileResult:
-    """Execute CEGIS decompilation, code emission, and optional runtime benchmarking."""
+    """Execute CEGIS decompilation, code emission, attribution, and optional benchmarking."""
     from glassbox.benchmark import run_benchmarks
     from glassbox.cegis import decompile_with_cegis
     from glassbox.emitters import emit_all
@@ -72,14 +127,54 @@ def run_decompile_pipeline(
         bench_entries = run_benchmarks(model, result.program, result.code)
         result.benchmarks = bench_entries
         result.certificate.benchmarks = bench_entries
+    _enrich_numerical_assurance(result)
+
+    domain = model.metadata.domain
+    try:
+        from glassbox.loader import compute_regime_neuron_profiles, explain_decision
+
+        if not result.regime_neuron_profiles:
+            rng = np.random.default_rng(config.seed)
+            lo = np.asarray(domain.lower_bounds, dtype=np.float64)
+            hi = np.asarray(domain.upper_bounds, dtype=np.float64)
+            X_attr = rng.uniform(lo, hi, size=(1024, domain.input_dim))
+            result.regime_neuron_profiles = compute_regime_neuron_profiles(
+                model, result.program, X_attr
+            )
+        if not result.sample_explanations:
+            leaf_map = (
+                result.certificate.real_arithmetic_proof.leaf_proven_map
+                if result.certificate.real_arithmetic_proof is not None
+                else None
+            )
+            pts = _sample_explanation_points(domain, result.counterexamples, count=5)
+            result.sample_explanations = [
+                explain_decision(model, result.program, pt, leaf_proven_map=leaf_map)
+                for pt in pts
+            ]
+    except ImportError:
+        pass
+
+    if run_pareto_flag and not result.pareto_frontier:
+        try:
+            from glassbox.cegis import search_pareto_frontier
+
+            result.pareto_frontier = search_pareto_frontier(
+                model, config, budgets=pareto_budgets, run_c_bench=run_benchmarks_flag
+            )
+        except ImportError:
+            pass
+
     return result
 
 
 def _status_style(status: VerificationStatus) -> str:
-    if status == VerificationStatus.PROVEN_SMT:
+    if status.is_proven:
         return "bold green"
     if status == VerificationStatus.BOUNDED_EMPIRICAL:
         return "bold yellow"
+    if status in {VerificationStatus.TIMEOUT, VerificationStatus.UNKNOWN}:
+        return "bold magenta"
     if status == VerificationStatus.COUNTEREXAMPLE_FOUND:
         return "bold red"
     return "dim"
@@ -88,10 +183,12 @@ def _status_style(status: VerificationStatus) -> str:
 def _print_benchmarks_table(benchmarks: list[Any], title: str = "Runtime Benchmarks") -> None:
     table = Table(title=title, show_header=True, header_style="bold cyan")
     table.add_column("Runtime")
+    table.add_column("Batch", justify="right")
     table.add_column("p50 (us)", justify="right")
+    table.add_column("Native (ns)", justify="right")
     table.add_column("p95 (us)", justify="right")
     table.add_column("p99 (us)", justify="right")
-    table.add_column("Throughput (inf/s)", justify="right")
+    table.add_column("Measured (inf/s)", justify="right")
     table.add_column("Size (B)", justify="right")
     table.add_column("Speedup", justify="right")
     table.add_column("Max Diff", justify="right")
@@ -99,16 +196,49 @@ def _print_benchmarks_table(benchmarks: list[Any], title: str = "Runtime Benchma
 
     for b in benchmarks:
         status = "OK" if b.available else f"N/A ({b.note})"
+        tput = b.measured_throughput_ips if b.measured_throughput_ips > 0 else b.throughput_ips
+        native_ns = f"{b.native_loop_p50_ns:.1f}" if b.native_loop_p50_ns is not None else "-"
         table.add_row(
             b.runtime,
-            f"{b.p50_us:.2f}" if b.available else "-",
-            f"{b.p95_us:.2f}" if b.available else "-",
-            f"{b.p99_us:.2f}" if b.available else "-",
-            f"{b.throughput_ips:,.0f}" if b.available else "-",
+            str(b.batch_size),
+            f"{b.p50_us:.3f}" if b.available else "-",
+            native_ns if b.available else "-",
+            f"{b.p95_us:.3f}" if b.available else "-",
+            f"{b.p99_us:.3f}" if b.available else "-",
+            f"{tput:,.0f}" if b.available else "-",
             f"{b.artifact_bytes:,}" if b.artifact_bytes else "-",
             f"{b.speedup_vs_onnx:.2f}x" if b.available else "-",
             f"{b.max_diff_vs_ref:.2e}" if b.available else "-",
             status,
+        )
+    console.print(table)
+
+
+def _print_pareto_table(candidates: list[Any]) -> None:
+    table = Table(title="Certified Program Pareto Frontier", header_style="bold cyan")
+    table.add_column("ID")
+    table.add_column("Budget", justify="right")
+    table.add_column("Regimes", justify="right")
+    table.add_column("AST Nodes", justify="right")
+    table.add_column("Status")
+    table.add_column("Agreement", justify="right")
+    table.add_column("Max Error", justify="right")
+    table.add_column("C99 (ns)", justify="right")
+    table.add_column("Pareto Optimal")
+
+    for c in candidates:
+        style = _status_style(c.status)
+        c_ns = f"{c.c99_native_ns:.1f}" if c.c99_native_ns is not None else "-"
+        table.add_row(
+            c.candidate_id,
+            str(c.max_regimes_budget),
+            str(c.actual_regimes),
+            str(c.ast_nodes),
+            f"[{style}]{c.status.value}[/{style}]",
+            f"{c.agreement_rate * 100:.2f}%",
+            f"{c.max_abs_error:.5f}",
+            c_ns,
+            "[green]YES[/green]" if c.is_pareto_optimal else "no",
         )
     console.print(table)
 
@@ -196,7 +326,9 @@ def zoo_list(
         out_dim = meta.get("output_dim") or len(domain.get("output_names", []))
         task = domain.get("task_type", item.get("task_type", "?"))
         pwl = meta.get("is_piecewise_linear", item.get("is_piecewise_linear", "?"))
-        exists = item.get("available", item.get("exists", (target_dir / f"{item['id']}.onnx").is_file()))
+        exists = item.get(
+            "available", item.get("exists", (target_dir / f"{item['id']}.onnx").is_file())
+        )
         table.add_row(
             str(item["id"]),
             str(task),
@@ -253,6 +385,14 @@ def decompile_model(
     bench: Annotated[
         bool, typer.Option("--bench/--no-bench", help="Run runtime benchmarks.")
     ] = True,
+    bundle: Annotated[
+        bool,
+        typer.Option("--bundle/--no-bundle", help="Write reproducible .gbundle directory."),
+    ] = False,
+    pareto: Annotated[
+        bool,
+        typer.Option("--pareto/--no-pareto", help="Search Pareto complexity-fidelity frontier."),
+    ] = False,
 ) -> None:
     """Decompile an ONNX neural network via CEGIS + Z3 SMT and emit native code."""
     from glassbox.loader import load_onnx
@@ -277,6 +417,7 @@ def decompile_model(
         loaded,
         config,
         run_benchmarks_flag=bench,
+        run_pareto_flag=pareto,
         on_iteration=iterations_seen.append,
     )
 
@@ -309,6 +450,12 @@ def decompile_model(
     cert_path = out / f"{stem}.certificate.json"
     cert_path.write_text(result.certificate.model_dump_json(indent=2), encoding="utf-8")
     written.append(cert_path)
+
+    if bundle:
+        from glassbox.certificate import write_artifact_bundle
+
+        bundle_dir = write_artifact_bundle(result, model_path, out / f"{stem}.gbundle")
+        written.append(bundle_dir)
 
     cegis_tbl = Table(title=f"CEGIS Trace: {loaded.metadata.name}", header_style="bold cyan")
     cegis_tbl.add_column("Iter", justify="right")
@@ -359,8 +506,66 @@ def decompile_model(
         )
     )
 
+    if pareto and result.pareto_frontier:
+        _print_pareto_table(result.pareto_frontier)
+
     if bench and result.benchmarks:
         _print_benchmarks_table(result.benchmarks)
+
+
+@app.command("verify")
+def verify_bundle_cmd(
+    bundle_path: Annotated[
+        Path, typer.Argument(exists=True, help="Path to a .gbundle directory.")
+    ],
+    smt: Annotated[
+        bool, typer.Option("--smt/--no-smt", help="Replay exact rational Z3 SMT verification.")
+    ] = True,
+    timeout: Annotated[
+        float, typer.Option("--timeout", min=0.5, help="Z3 SMT replay timeout in seconds.")
+    ] = 6.0,
+) -> None:
+    """Independently verify and replay an emitted GlassBox artifact bundle (.gbundle)."""
+    from glassbox.certificate import verify_artifact_bundle
+
+    report = verify_artifact_bundle(
+        bundle_path,
+        recompute_smt=smt,
+        smt_timeout_s=timeout,
+    )
+
+    verdict_ok = report.verdict == "VERIFIED_REPRODUCED"
+    verdict_style = "bold green" if verdict_ok else "bold red"
+
+    table = Table(
+        title=f"GlassBox Artifact Bundle Verification: {bundle_path.name}",
+        show_header=False,
+    )
+    table.add_column("Check", style="bold cyan")
+    table.add_column("Result")
+    table.add_row("Bundle Path", report.bundle_path)
+    table.add_row("Verdict", f"[{verdict_style}]{report.verdict}[/{verdict_style}]")
+    table.add_row(
+        "SHA-256 Hashes Valid",
+        "[green]YES[/green]" if report.hashes_valid else "[red]NO[/red]",
+    )
+    table.add_row("Claimed Status", report.claimed_status.value)
+    table.add_row("Replayed Status", report.replayed_status.value)
+    table.add_row(
+        "Exact Rational Z3 Replay",
+        "[green]REPLAYED[/green]" if report.smt_replayed else "[yellow]SKIPPED[/yellow]",
+    )
+    table.add_row(
+        "Numerical Deployment Checks",
+        "[green]PASSED[/green]" if report.numerical_checks_passed else "[red]FAILED[/red]",
+    )
+    table.add_row("Replay Time (ms)", f"{report.replay_time_ms:.1f}")
+    if report.details:
+        table.add_row("Details", "\n".join(report.details))
+    console.print(table)
+
+    if not verdict_ok:
+        raise typer.Exit(code=1)
 
 
 @app.command("bench")

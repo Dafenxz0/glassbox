@@ -17,27 +17,36 @@ from glassbox.ir import (
     is_expr_linear,
 )
 from glassbox.types import (
+    ArtifactManifest,
     BenchmarkEntry,
+    BundleVerificationReport,
     CEGISIteration,
     Counterexample,
+    DecisionExplanation,
     DecompileConfig,
     DomainSpec,
     LayerInfo,
     ModelMetadata,
+    NumericalDeploymentAssurance,
+    ParetoCandidate,
+    RealArithmeticProof,
     TaskType,
     VerificationCertificate,
     VerificationStatus,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
+    "ArtifactManifest",
     "BenchmarkEntry",
     "BinaryExpr",
+    "BundleVerificationReport",
     "CEGISIteration",
     "ClampExpr",
     "ConstExpr",
     "Counterexample",
+    "DecisionExplanation",
     "DecompileConfig",
     "DecompileResult",
     "DecompiledProgram",
@@ -47,6 +56,9 @@ __all__ = [
     "LayerInfo",
     "LinearGuard",
     "ModelMetadata",
+    "NumericalDeploymentAssurance",
+    "ParetoCandidate",
+    "RealArithmeticProof",
     "RegimeLeaf",
     "RegimeNode",
     "TaskType",

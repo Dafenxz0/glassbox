@@ -1,4 +1,4 @@
-"""Counterexample-Guided Inductive Synthesis (CEGIS) decompilation loop."""
+"""Counterexample-Guided Inductive Synthesis (CEGIS) decompilation loop and Pareto search."""
 
 from __future__ import annotations
 
@@ -6,20 +6,22 @@ import itertools
 import math
 import time
 import uuid
-from collections.abc import Callable
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from scipy.stats import qmc
 
-from glassbox.certificate import build_certificate
+from glassbox.certificate import build_certificate, build_numerical_assurance
 from glassbox.ir import DecompiledProgram, DecompileResult
 from glassbox.types import (
     BenchmarkEntry,
     CEGISIteration,
     Counterexample,
+    DecisionExplanation,
     DecompileConfig,
     DomainSpec,
+    ParetoCandidate,
     TaskType,
     VerificationCertificate,
     VerificationStatus,
@@ -115,7 +117,11 @@ def _candidate_rank(
     task_type: TaskType,
 ) -> tuple[float, ...]:
     """Higher tuple is strictly better when choosing the monotonic best program."""
-    proven = 1.0 if status == VerificationStatus.PROVEN_SMT else 0.0
+    proven = (
+        2.0
+        if status == VerificationStatus.PROVEN_REAL_GLOBAL
+        else (1.0 if status.is_proven else 0.0)
+    )
     zero_cex = 1.0 if num_cexs == 0 else 0.0
     if task_type == TaskType.CLASSIFICATION:
         return (proven, zero_cex, stats.agreement_rate, float(-num_cexs), -max_abs_error)
@@ -144,7 +150,7 @@ def decompile_with_cegis(
     config: DecompileConfig | None = None,
     on_iteration: Callable[[CEGISIteration], None] | None = None,
 ) -> tuple[DecompiledProgram, VerificationCertificate, list[Counterexample]]:
-    """Decompile an ONNX model into a verified symbolic program via CEGIS + Z3 SMT."""
+    """Decompile an ONNX model into a verified symbolic program via CEGIS + exact Z3 SMT."""
     from glassbox.regimes import extract_regimes, refine_regime_around_counterexamples
     from glassbox.synthesizer import synthesize_program
 
@@ -201,7 +207,6 @@ def decompile_with_cegis(
                 model, X_train, Y_train, eff_cfg, weights=weights, partition=partition
             )
 
-            # If regime budget prevented splitting, try a weighted re-partition and keep the better fit.
             if len(partition.leaf_indices) <= prev_leaf_count:
                 fresh_part = extract_regimes(model, X_train, Y_train, eff_cfg, weights=weights)
                 fresh_prog = synthesize_program(
@@ -214,11 +219,7 @@ def decompile_with_cegis(
                     program = fresh_prog
 
         eval_stats, adv_cexs = evaluate_and_falsify(model, program, eff_cfg, iteration=t)
-        smt_res = (
-            verify_smt(model, program, eff_cfg, iteration=t)
-            if eff_cfg.verify_smt
-            else SMTResult(checked=False, proven=False, timed_out=False, reason="smt_disabled")
-        )
+        smt_res = verify_smt(model, program, eff_cfg, iteration=t)
 
         iter_cexs: list[Counterexample] = []
         if smt_res.counterexample is not None:
@@ -240,9 +241,13 @@ def decompile_with_cegis(
             iter_max_err = max(iter_max_err, smt_res.counterexample.max_abs_error)
 
         if smt_res.proven:
-            status = VerificationStatus.PROVEN_SMT
+            status = smt_res.status
         elif iter_cexs:
             status = VerificationStatus.COUNTEREXAMPLE_FOUND
+        elif smt_res.checked and smt_res.timed_out:
+            status = VerificationStatus.TIMEOUT
+        elif smt_res.checked:
+            status = VerificationStatus.UNKNOWN
         else:
             status = VerificationStatus.BOUNDED_EMPIRICAL
 
@@ -276,17 +281,9 @@ def decompile_with_cegis(
             best_max_err = iter_max_err
             best_smt_res = smt_res
 
-        if status == VerificationStatus.PROVEN_SMT:
+        if status.is_proven:
             break
         if not iter_cexs:
-            if task_type == TaskType.REGRESSION and iter_max_err <= eff_cfg.tolerance_eps:
-                break
-            if (
-                task_type == TaskType.CLASSIFICATION
-                and eval_stats.agreement_rate >= eff_cfg.target_agreement
-            ):
-                break
-            # No violations left to drive refinement (e.g., SMT timed out on clean empirical fit).
             break
 
         active_cexs = iter_cexs
@@ -308,8 +305,128 @@ def decompile_with_cegis(
         smt_proven=best_smt_res.proven,
         total_counterexamples_found=len(all_counterexamples),
         cegis_iterations=iterations,
+        real_arithmetic_proof=best_smt_res.proof,
+        eval_samples=best_stats.num_samples,
     )
     return best_program, certificate, all_counterexamples
+
+
+def search_pareto_frontier(
+    model: LoadedModel,
+    base_config: DecompileConfig | None = None,
+    budgets: Sequence[int] = (2, 4, 8, 16),
+    run_c_bench: bool = True,
+) -> list[ParetoCandidate]:
+    """Explore complexity-vs-fidelity Pareto frontier across regime budgets."""
+    from glassbox.benchmark import run_benchmarks
+    from glassbox.emitters import emit_all
+
+    cfg = base_config or DecompileConfig()
+    domain = model.metadata.domain
+    task_type = cfg.task_type or domain.task_type
+    candidates: list[ParetoCandidate] = []
+
+    for b in budgets:
+        budget = max(1, int(b))
+        depth = max(1, math.ceil(math.log2(max(2, budget))) + 1)
+        b_cfg = cfg.model_copy(
+            update={
+                "max_regimes": budget,
+                "max_depth": depth,
+                "max_cegis_iters": min(cfg.max_cegis_iters, 3),
+                "smt_timeout_s": min(cfg.smt_timeout_s, 3.0),
+            }
+        )
+        prog, cert, _ = decompile_with_cegis(model, b_cfg)
+        code_map = emit_all(prog)
+
+        c99_p50_us: float | None = None
+        c99_native_ns: float | None = None
+        if run_c_bench:
+            bench_entries = run_benchmarks(model, prog, code_map, n_warmup=20, n_iters=200)
+            for entry in bench_entries:
+                if not entry.available:
+                    continue
+                if "ctypes" in entry.runtime.lower() or "dll" in entry.runtime.lower():
+                    c99_p50_us = float(entry.p50_us)
+                if entry.native_loop_p50_ns is not None:
+                    c99_native_ns = float(entry.native_loop_p50_ns)
+
+        candidates.append(
+            ParetoCandidate(
+                candidate_id=f"regimes_{budget}",
+                max_regimes_budget=budget,
+                actual_regimes=len(prog.leaves()),
+                ast_nodes=prog.ast_node_count(),
+                status=cert.status,
+                agreement_rate=cert.agreement_rate,
+                max_abs_error=cert.max_abs_error,
+                mean_abs_error=cert.mean_abs_error,
+                c99_p50_us=c99_p50_us,
+                c99_native_ns=c99_native_ns,
+                c_source_bytes=len(code_map.get("c", "").encode("utf-8")),
+                is_pareto_optimal=False,
+                program_sha256=prog.sha256(),
+                code_c=code_map.get("c", ""),
+                code_rust=code_map.get("rust", ""),
+                code_python=code_map.get("python", ""),
+            )
+        )
+
+    def _loss(cand: ParetoCandidate) -> float:
+        if task_type == TaskType.CLASSIFICATION:
+            return round(1.0 - cand.agreement_rate, 6)
+        return round(cand.max_abs_error, 6)
+
+    for i, cand in enumerate(candidates):
+        dominated = False
+        loss_i = _loss(cand)
+        for j, other in enumerate(candidates):
+            if i == j:
+                continue
+            loss_j = _loss(other)
+            if (
+                other.ast_nodes <= cand.ast_nodes
+                and loss_j <= loss_i
+                and (other.ast_nodes < cand.ast_nodes or loss_j < loss_i)
+            ):
+                dominated = True
+                break
+        cand.is_pareto_optimal = not dominated
+
+    return candidates
+
+
+def _build_default_explanations(
+    model: LoadedModel,
+    program: DecompiledProgram,
+    counterexamples: list[Counterexample],
+    leaf_proven_map: dict[int, bool],
+) -> list[DecisionExplanation]:
+    """Compute 5 deterministic decision explanations across domain points and counterexamples."""
+    from glassbox.loader import explain_decision
+
+    domain = model.metadata.domain
+    lo = np.asarray(domain.lower_bounds, dtype=np.float64)
+    hi = np.asarray(domain.upper_bounds, dtype=np.float64)
+    mid = 0.5 * (lo + hi)
+    q1 = lo + 0.25 * (hi - lo)
+    q3 = lo + 0.75 * (hi - lo)
+
+    sample_pts: list[list[float]] = [mid.tolist()]
+    for cex in counterexamples[:2]:
+        sample_pts.append(list(cex.x))
+    for pt in (q1, q3, lo + 0.15 * (hi - lo), lo + 0.85 * (hi - lo)):
+        if len(sample_pts) >= 5:
+            break
+        sample_pts.append(pt.tolist())
+
+    explanations: list[DecisionExplanation] = []
+    for x_vec in sample_pts[:5]:
+        explanations.append(
+            explain_decision(model, program, x_vec, leaf_proven_map=leaf_proven_map)
+        )
+    return explanations
 
 
 def run_decompile_pipeline(
@@ -319,15 +436,47 @@ def run_decompile_pipeline(
     run_id: str | None = None,
     code: dict[str, str] | None = None,
     benchmarks: list[BenchmarkEntry] | None = None,
+    include_pareto: bool = False,
+    pareto_budgets: Sequence[int] = (2, 4, 8, 16),
 ) -> DecompileResult:
-    """Convenience wrapper returning a complete DecompileResult bundle."""
+    """Convenience wrapper returning a complete DecompileResult bundle with attribution."""
+    from glassbox.loader import compute_regime_neuron_profiles
+
     program, certificate, counterexamples = decompile_with_cegis(
         model=model,
         config=config,
         on_iteration=on_iteration,
     )
     if benchmarks:
-        certificate = certificate.model_copy(update={"benchmarks": list(benchmarks)})
+        nda = build_numerical_assurance(
+            ir_vs_onnx_max_diff=certificate.max_abs_error,
+            ir_vs_onnx_agreement=certificate.agreement_rate,
+            onnxruntime_samples_checked=(
+                certificate.numerical_deployment_assurance.onnxruntime_samples_checked
+                if certificate.numerical_deployment_assurance is not None
+                else 4096
+            ),
+            benchmarks=benchmarks,
+        )
+        certificate = certificate.model_copy(
+            update={"benchmarks": list(benchmarks), "numerical_deployment_assurance": nda}
+        )
+
+    eff_cfg = config or DecompileConfig()
+    X_attr = _sample_initial_domain(model.metadata.domain, 1024, eff_cfg.seed)
+    neuron_profiles: dict[int, dict[str, Any]] = compute_regime_neuron_profiles(
+        model, program, X_attr
+    )
+    leaf_proven_map = (
+        certificate.real_arithmetic_proof.leaf_proven_map
+        if certificate.real_arithmetic_proof is not None
+        else {}
+    )
+    explanations = _build_default_explanations(model, program, counterexamples, leaf_proven_map)
+    pareto = (
+        search_pareto_frontier(model, eff_cfg, budgets=pareto_budgets) if include_pareto else []
+    )
+
     return DecompileResult(
         run_id=run_id or uuid.uuid4().hex[:12],
         metadata=model.metadata,
@@ -336,7 +485,10 @@ def run_decompile_pipeline(
         counterexamples=counterexamples,
         code=dict(code) if code is not None else {},
         benchmarks=list(benchmarks) if benchmarks is not None else [],
+        pareto_frontier=pareto,
+        regime_neuron_profiles=neuron_profiles,
+        sample_explanations=explanations,
     )
 
 
-__all__ = ["decompile_with_cegis", "run_decompile_pipeline"]
+__all__ = ["decompile_with_cegis", "run_decompile_pipeline", "search_pareto_frontier"]

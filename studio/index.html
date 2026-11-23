@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="light dark">
-  <title>GlassBox Studio — Neural Network Decompiler &amp; SMT Verifier</title>
+  <title>GlassBox Studio 2.0 — Neural Network Decompiler &amp; Real-Arithmetic SMT Verifier</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Crect x='2' y='2' width='20' height='20' rx='3' stroke='%23111111' stroke-width='2' fill='%23ffffff'/%3E%3Cpath d='M2 12H22M12 2V22' stroke='%23111111' stroke-width='1.5' stroke-opacity='0.35'/%3E%3Cpath d='M6 18L18 6' stroke='%231a4be0' stroke-width='2.2'/%3E%3Ccircle cx='12' cy='12' r='2.2' fill='%231a4be0'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -14,7 +14,7 @@
 <body data-radius="sharp">
   <header class="topbar">
     <div class="topbar-brand">
-      <a href="/" class="brand-link" aria-label="GlassBox home">
+      <a href="../" class="brand-link" aria-label="GlassBox home">
         <svg class="brand-mark" width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <rect x="2" y="2" width="20" height="20" rx="3" stroke="currentColor" stroke-width="2"></rect>
           <path d="M2 12H22M12 2V22" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.45"></path>
@@ -24,7 +24,7 @@
         <span class="brand-wordmark">GlassBox</span>
       </a>
       <span class="brand-divider" aria-hidden="true">/</span>
-      <span class="brand-product">Studio</span>
+      <span class="brand-product">Studio 2.0</span>
       <div id="mode-pill" class="mode-pill" data-mode="checking" role="status" aria-live="polite">
         <span class="mode-dot" aria-hidden="true"></span>
         <span id="mode-pill-text">Probing engine...</span>
@@ -75,13 +75,14 @@
   </div>
 
   <main class="workbench">
-    <!-- LEFT PANE: Verification Status, ONNX Stack, Operating Regimes, CEGIS Chart -->
-    <aside class="pane pane-left" aria-label="Model overview, operating regimes, and CEGIS convergence">
+    <!-- LEFT PANE: Two-Tier Verification Status, Pareto Frontier, Operating Regimes (+ Neuron Badges), ONNX Stack, CEGIS Chart -->
+    <aside class="pane pane-left" aria-label="Verification status, Pareto frontier, operating regimes, and CEGIS convergence">
       <section class="card">
         <div class="card-head">
-          <h2 class="card-title">Verification Status</h2>
+          <h2 class="card-title">Verification Guarantee</h2>
           <span id="verif-badge" class="status-badge" data-status="UNVERIFIED">UNVERIFIED</span>
         </div>
+        <p id="verif-tier-subtitle" class="verif-tier-sub">Awaiting verification run.</p>
         <div class="kpi-grid">
           <div class="kpi-cell">
             <span class="kpi-label">Agreement</span>
@@ -92,14 +93,41 @@
             <span id="kpi-max-err" class="kpi-value mono">—</span>
           </div>
           <div class="kpi-cell">
-            <span class="kpi-label">SMT Proof</span>
+            <span class="kpi-label">Rational Z3 Proof</span>
             <span id="kpi-smt" class="kpi-value mono">—</span>
           </div>
           <div class="kpi-cell">
-            <span class="kpi-label">Counterexamples</span>
-            <span id="kpi-ce-count" class="kpi-value mono">—</span>
+            <span class="kpi-label">Leaves Proven</span>
+            <span id="kpi-leaves-proven" class="kpi-value mono">—</span>
           </div>
         </div>
+      </section>
+
+      <section class="card" id="pareto-card">
+        <div class="card-head">
+          <h2 class="card-title">Certified Pareto Frontier</h2>
+          <div class="card-head-actions">
+            <span id="pareto-count-pill" class="tag-pill">0 pts</span>
+            <button type="button" id="btn-reset-pareto" class="btn-link" hidden>Return to Best Program</button>
+          </div>
+        </div>
+        <p class="card-sub">Complexity (AST nodes) vs Max Error |&Delta;|. Click a point to preview its C99/Rust/Python code.</p>
+        <div class="chart-wrap">
+          <svg id="pareto-chart" class="pareto-chart" viewBox="0 0 320 156" role="img" aria-label="Pareto frontier complexity vs error scatter plot"></svg>
+        </div>
+        <div id="pareto-pills" class="pareto-pills" role="list"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2 class="card-title">Operating Regimes &amp; Neurons</h2>
+          <div class="card-head-actions">
+            <span id="regime-count-pill" class="tag-pill">0</span>
+            <button type="button" id="btn-clear-regime" class="btn-link" hidden>Clear</button>
+          </div>
+        </div>
+        <p class="card-sub">Click a regime to highlight its code lines, graph leaf, active ONNX ReLU neurons, and 2D region.</p>
+        <div id="regime-list" class="regime-list" role="list"></div>
       </section>
 
       <section class="card">
@@ -109,18 +137,6 @@
         </div>
         <div id="model-meta-summary" class="meta-kv"></div>
         <ol id="layer-stack" class="layer-stack"></ol>
-      </section>
-
-      <section class="card">
-        <div class="card-head">
-          <h2 class="card-title">Operating Regimes</h2>
-          <div class="card-head-actions">
-            <span id="regime-count-pill" class="tag-pill">0</span>
-            <button type="button" id="btn-clear-regime" class="btn-link" hidden>Clear</button>
-          </div>
-        </div>
-        <p class="card-sub">Click a regime to highlight its code lines, graph leaf, and 2D input region.</p>
-        <div id="regime-list" class="regime-list" role="list"></div>
       </section>
 
       <section class="card">
@@ -156,6 +172,11 @@
             <button type="button" id="btn-copy-code" class="btn btn-sm btn-secondary">Copy</button>
             <button type="button" id="btn-download-code" class="btn btn-sm btn-secondary">Download</button>
           </div>
+        </div>
+
+        <div id="pareto-preview-bar" class="pareto-preview-bar" hidden>
+          <span id="pareto-preview-text" class="mono">Inspecting Pareto Candidate</span>
+          <button type="button" id="btn-pareto-bar-reset" class="btn btn-sm btn-secondary">Return to Best Program</button>
         </div>
 
         <div class="panels-stage">
@@ -208,8 +229,8 @@
       </div>
     </section>
 
-    <!-- RIGHT PANE: 2D Input-Space MRI, Counterexamples, Benchmarks -->
-    <aside class="pane pane-right" aria-label="Input-space MRI, counterexamples, and benchmarks">
+    <!-- RIGHT PANE: 2D Input-Space MRI, Explain This Decision + Neuron Attribution, Counterexamples, 6-Row Honest Benchmarks -->
+    <aside class="pane pane-right" aria-label="Input-space MRI, decision explanation, counterexamples, and benchmarks">
       <section class="card">
         <div class="card-head">
           <h2 class="card-title">2D Input-Space MRI</h2>
@@ -252,7 +273,20 @@
         </div>
 
         <div id="mri-legend" class="mri-legend"></div>
-        <div id="mri-readout" class="mri-readout mono">Hover canvas to inspect coordinates, NN vs Code values, and regime.</div>
+        <div id="mri-readout" class="mri-readout mono">Click or hover canvas to trace exact decision guards, formula outputs, and ONNX neurons.</div>
+      </section>
+
+      <!-- EXPLAIN THIS DECISION & RULE-TO-NEURON ATTRIBUTION -->
+      <section class="card" id="explain-card">
+        <div class="card-head">
+          <h2 class="card-title">Explain This Decision</h2>
+          <span id="explain-regime-badge" class="status-badge" data-status="UNVERIFIED">Regime —</span>
+        </div>
+        <p class="card-sub">Deterministic guard trace, formula evaluation &amp; ONNX hidden neuron attribution (zero LLM).</p>
+        <div id="explain-sample-pills" class="explain-sample-pills"></div>
+        <div id="explain-content" class="explain-content">
+          <p class="card-sub">Click any point on the 2D MRI canvas or a counterexample row to trace its causal path.</p>
+        </div>
       </section>
 
       <section class="card">
@@ -282,7 +316,7 @@
       <section class="card">
         <div class="card-head">
           <h2 class="card-title">Native Runtime Benchmarks</h2>
-          <span class="tag-pill">p50 &mu;s</span>
+          <span class="tag-pill">Measured inf/s</span>
         </div>
         <div id="bench-list" class="bench-list"></div>
       </section>
@@ -318,7 +352,7 @@
   <!-- VERIFICATION CERTIFICATE DIALOG -->
   <dialog id="cert-dialog" class="studio-dialog studio-dialog-wide" closedby="any" aria-labelledby="cert-dialog-title">
     <div class="dialog-header">
-      <h2 id="cert-dialog-title" class="dialog-title">Verification Certificate</h2>
+      <h2 id="cert-dialog-title" class="dialog-title">Two-Tier Verification Certificate</h2>
       <button type="button" class="btn-icon dialog-close" data-close-dialog="cert-dialog" aria-label="Close certificate dialog">&times;</button>
     </div>
     <div class="dialog-body">
