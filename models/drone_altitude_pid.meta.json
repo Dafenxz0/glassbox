@@ -1,0 +1,64 @@
+{
+  "id": "drone_altitude_pid",
+  "name": "Drone Altitude Hold PD + Battery Sag",
+  "description": "1D continuous thrust controller (3 -> 12 -> 10 -> 1 ReLU MLP) trained on piecewise-linear altitude-hold PD with battery-sag compensation clamped to [0, 1].",
+  "onnx_file": "drone_altitude_pid.onnx",
+  "sha256": "93dde505903975a0c4bc6299a0bc2720a199399fdec2ba9ca484fcb1f2d7624d",
+  "size_bytes": 1390,
+  "architecture": [
+    3,
+    12,
+    10,
+    1
+  ],
+  "activations": [
+    "Relu",
+    "Relu",
+    "Identity"
+  ],
+  "onnx_ops": [
+    "Gemm",
+    "Relu",
+    "Gemm",
+    "Relu",
+    "Gemm"
+  ],
+  "is_piecewise_linear": true,
+  "seed": 202,
+  "metrics": {
+    "val_mse": 0.00040115450757167054,
+    "val_mae": 0.012710711676359865,
+    "val_max_abs_err": 0.13891839981079102
+  },
+  "domain": {
+    "feature_names": [
+      "alt_error",
+      "vert_vel",
+      "battery_v"
+    ],
+    "lower_bounds": [
+      -3.0,
+      -3.0,
+      10.5
+    ],
+    "upper_bounds": [
+      3.0,
+      3.0,
+      12.6
+    ],
+    "output_names": [
+      "thrust_cmd"
+    ],
+    "task_type": "regression",
+    "class_names": []
+  },
+  "recommended_config": {
+    "task_type": "regression",
+    "max_regimes": 8,
+    "max_depth": 4,
+    "max_degree": 1,
+    "tolerance_eps": 0.03,
+    "verify_smt": true,
+    "smt_timeout_s": 4.0
+  }
+}

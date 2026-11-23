@@ -1,0 +1,49 @@
+name: GlassBox CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-and-compile:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Verify C99 and Rust compilers
+        run: |
+          gcc --version
+          rustc --version
+
+      - name: Install GlassBox with dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Ruff lint checks
+        run: ruff check src tests scripts
+
+      - name: Run pytest suite
+        run: pytest -v
+
+      - name: Smoke-test ONNX decompilation and native C99/Rust compilation
+        run: |
+          rm -rf /tmp/gb_out
+          glassbox decompile models/cartpole_policy.onnx --out /tmp/gb_out --targets c,rust,python
+          gcc -Wall -Wextra -Werror -std=c99 -O3 -DGLASSBOX_MAIN /tmp/gb_out/*.c -lm -o /tmp/gb_test
+          /tmp/gb_test
+          rustc --test -D warnings /tmp/gb_out/*.rs -o /tmp/gb_rs_test
+          /tmp/gb_rs_test

@@ -1,0 +1,367 @@
+{
+  "models": [
+    {
+      "id": "cartpole_policy",
+      "name": "CartPole LQR Policy",
+      "description": "2-class optimal LQR CartPole feedback controller (4 -> 12 -> 12 -> 2 ReLU MLP) trained on score = -0.5*x - 0.8*v + 3.2*theta + 0.9*omega.",
+      "metadata": {
+        "name": "cartpole_policy",
+        "path": "H:\\RocketStudentDataFactory\\glassbox\\models\\cartpole_policy.onnx",
+        "sha256": "d8af4ee77d52a7e167c6117ab9964746b56c6b026adab0dbea3ca45eacadfc30",
+        "size_bytes": 1602,
+        "input_dim": 4,
+        "output_dim": 2,
+        "total_params": 242,
+        "is_piecewise_linear": true,
+        "activations": [
+          "Relu",
+          "Relu",
+          "Identity"
+        ],
+        "layers": [
+          {
+            "name": "/0/Gemm",
+            "op_type": "Gemm",
+            "in_features": 4,
+            "out_features": 12,
+            "activation": "Relu",
+            "param_count": 60
+          },
+          {
+            "name": "/2/Gemm",
+            "op_type": "Gemm",
+            "in_features": 12,
+            "out_features": 12,
+            "activation": "Relu",
+            "param_count": 156
+          },
+          {
+            "name": "/4/Gemm",
+            "op_type": "Gemm",
+            "in_features": 12,
+            "out_features": 2,
+            "activation": "Identity",
+            "param_count": 26
+          }
+        ],
+        "domain": {
+          "feature_names": [
+            "cart_pos",
+            "cart_vel",
+            "pole_angle",
+            "pole_ang_vel"
+          ],
+          "lower_bounds": [
+            -1.5,
+            -2.5,
+            -0.24,
+            -2.5
+          ],
+          "upper_bounds": [
+            1.5,
+            2.5,
+            0.24,
+            2.5
+          ],
+          "output_names": [
+            "logit_left",
+            "logit_right"
+          ],
+          "task_type": "classification",
+          "class_names": [
+            "LEFT",
+            "RIGHT"
+          ]
+        }
+      },
+      "default_config": {
+        "task_type": "classification",
+        "max_regimes": 6,
+        "max_depth": 3,
+        "regime_method": "oblique_tree",
+        "max_degree": 1,
+        "tolerance_eps": 0.05,
+        "classification_margin": 0.05,
+        "target_agreement": 0.99,
+        "max_cegis_iters": 6,
+        "initial_samples": 2000,
+        "verify_smt": true,
+        "smt_timeout_s": 4.0,
+        "adversarial_restarts": 24,
+        "seed": 42
+      },
+      "has_prebuilt_run": true
+    },
+    {
+      "id": "drone_altitude_pid",
+      "name": "Drone Altitude Hold PD + Battery Sag",
+      "description": "1D continuous thrust controller (3 -> 12 -> 10 -> 1 ReLU MLP) trained on piecewise-linear altitude-hold PD with battery-sag compensation clamped to [0, 1].",
+      "metadata": {
+        "name": "drone_altitude_pid",
+        "path": "H:\\RocketStudentDataFactory\\glassbox\\models\\drone_altitude_pid.onnx",
+        "sha256": "93dde505903975a0c4bc6299a0bc2720a199399fdec2ba9ca484fcb1f2d7624d",
+        "size_bytes": 1390,
+        "input_dim": 3,
+        "output_dim": 1,
+        "total_params": 189,
+        "is_piecewise_linear": true,
+        "activations": [
+          "Relu",
+          "Relu",
+          "Identity"
+        ],
+        "layers": [
+          {
+            "name": "/0/Gemm",
+            "op_type": "Gemm",
+            "in_features": 3,
+            "out_features": 12,
+            "activation": "Relu",
+            "param_count": 48
+          },
+          {
+            "name": "/2/Gemm",
+            "op_type": "Gemm",
+            "in_features": 12,
+            "out_features": 10,
+            "activation": "Relu",
+            "param_count": 130
+          },
+          {
+            "name": "/4/Gemm",
+            "op_type": "Gemm",
+            "in_features": 10,
+            "out_features": 1,
+            "activation": "Identity",
+            "param_count": 11
+          }
+        ],
+        "domain": {
+          "feature_names": [
+            "alt_error",
+            "vert_vel",
+            "battery_v"
+          ],
+          "lower_bounds": [
+            -3.0,
+            -3.0,
+            10.5
+          ],
+          "upper_bounds": [
+            3.0,
+            3.0,
+            12.6
+          ],
+          "output_names": [
+            "thrust_cmd"
+          ],
+          "task_type": "regression",
+          "class_names": []
+        }
+      },
+      "default_config": {
+        "task_type": "regression",
+        "max_regimes": 8,
+        "max_depth": 4,
+        "regime_method": "oblique_tree",
+        "max_degree": 1,
+        "tolerance_eps": 0.05,
+        "classification_margin": 0.05,
+        "target_agreement": 0.99,
+        "max_cegis_iters": 6,
+        "initial_samples": 2000,
+        "verify_smt": true,
+        "smt_timeout_s": 6.0,
+        "adversarial_restarts": 24,
+        "seed": 42
+      },
+      "has_prebuilt_run": true
+    },
+    {
+      "id": "reactor_safety_guard",
+      "name": "Reactor Thermal/Pressure Safety Guard",
+      "description": "3-class reactor safety envelope classifier (4 -> 14 -> 12 -> 3 ReLU MLP) with input standardization fused into the first linear layer for clean Z3 SMT proofs.",
+      "metadata": {
+        "name": "reactor_safety_guard",
+        "path": "H:\\RocketStudentDataFactory\\glassbox\\models\\reactor_safety_guard.onnx",
+        "sha256": "fcf80f348c38b13ef12c6c2e1945e63e255b374c47f50f742ca4652db85a0354",
+        "size_bytes": 1792,
+        "input_dim": 4,
+        "output_dim": 3,
+        "total_params": 289,
+        "is_piecewise_linear": true,
+        "activations": [
+          "Relu",
+          "Relu",
+          "Identity"
+        ],
+        "layers": [
+          {
+            "name": "/0/Gemm",
+            "op_type": "Gemm",
+            "in_features": 4,
+            "out_features": 14,
+            "activation": "Relu",
+            "param_count": 70
+          },
+          {
+            "name": "/2/Gemm",
+            "op_type": "Gemm",
+            "in_features": 14,
+            "out_features": 12,
+            "activation": "Relu",
+            "param_count": 180
+          },
+          {
+            "name": "/4/Gemm",
+            "op_type": "Gemm",
+            "in_features": 12,
+            "out_features": 3,
+            "activation": "Identity",
+            "param_count": 39
+          }
+        ],
+        "domain": {
+          "feature_names": [
+            "core_temp_c",
+            "coolant_flow",
+            "pressure_bar",
+            "flux_rate"
+          ],
+          "lower_bounds": [
+            280.0,
+            20.0,
+            80.0,
+            0.0
+          ],
+          "upper_bounds": [
+            420.0,
+            100.0,
+            180.0,
+            1.5
+          ],
+          "output_names": [
+            "logit_normal",
+            "logit_throttle",
+            "logit_scram"
+          ],
+          "task_type": "classification",
+          "class_names": [
+            "NORMAL",
+            "THROTTLE",
+            "SCRAM"
+          ]
+        }
+      },
+      "default_config": {
+        "task_type": "classification",
+        "max_regimes": 8,
+        "max_depth": 4,
+        "regime_method": "oblique_tree",
+        "max_degree": 1,
+        "tolerance_eps": 0.05,
+        "classification_margin": 0.1,
+        "target_agreement": 0.99,
+        "max_cegis_iters": 6,
+        "initial_samples": 2000,
+        "verify_smt": true,
+        "smt_timeout_s": 4.0,
+        "adversarial_restarts": 24,
+        "seed": 42
+      },
+      "has_prebuilt_run": true
+    },
+    {
+      "id": "nonlinear_actuator",
+      "name": "Nonlinear Actuator Torque & Damping",
+      "description": "2D smooth nonlinear controller (3 -> 24 -> 24 -> 2 Tanh + ReLU MLP) predicting motor_torque = sin(angle_err) - 0.35*omega - 0.25*load_torque and damping_gain = 0.4 + 0.2*angle_err^2 + 0.1*tanh(omega).",
+      "metadata": {
+        "name": "nonlinear_actuator",
+        "path": "H:\\RocketStudentDataFactory\\glassbox\\models\\nonlinear_actuator.onnx",
+        "sha256": "b67495a3e7ae8dca24aae7cedbce26d76198b0f967c867b547c6d2e53a9382c8",
+        "size_bytes": 3620,
+        "input_dim": 3,
+        "output_dim": 2,
+        "total_params": 746,
+        "is_piecewise_linear": false,
+        "activations": [
+          "Tanh",
+          "Relu",
+          "Identity"
+        ],
+        "layers": [
+          {
+            "name": "/0/Gemm",
+            "op_type": "Gemm",
+            "in_features": 3,
+            "out_features": 24,
+            "activation": "Tanh",
+            "param_count": 96
+          },
+          {
+            "name": "/2/Gemm",
+            "op_type": "Gemm",
+            "in_features": 24,
+            "out_features": 24,
+            "activation": "Relu",
+            "param_count": 600
+          },
+          {
+            "name": "/4/Gemm",
+            "op_type": "Gemm",
+            "in_features": 24,
+            "out_features": 2,
+            "activation": "Identity",
+            "param_count": 50
+          }
+        ],
+        "domain": {
+          "feature_names": [
+            "angle_err",
+            "omega",
+            "load_torque"
+          ],
+          "lower_bounds": [
+            -1.5,
+            -3.0,
+            -2.0
+          ],
+          "upper_bounds": [
+            1.5,
+            3.0,
+            2.0
+          ],
+          "output_names": [
+            "motor_torque",
+            "damping_gain"
+          ],
+          "task_type": "regression",
+          "class_names": []
+        }
+      },
+      "default_config": {
+        "task_type": "regression",
+        "max_regimes": 8,
+        "max_depth": 4,
+        "regime_method": "oblique_tree",
+        "max_degree": 2,
+        "tolerance_eps": 0.05,
+        "classification_margin": 0.05,
+        "target_agreement": 0.99,
+        "max_cegis_iters": 6,
+        "initial_samples": 2000,
+        "verify_smt": false,
+        "smt_timeout_s": 4.0,
+        "adversarial_restarts": 24,
+        "seed": 42
+      },
+      "has_prebuilt_run": true
+    }
+  ],
+  "runs": {
+    "cartpole_policy": "runs/cartpole_policy.json",
+    "drone_altitude_pid": "runs/drone_altitude_pid.json",
+    "reactor_safety_guard": "runs/reactor_safety_guard.json",
+    "nonlinear_actuator": "runs/nonlinear_actuator.json"
+  }
+}

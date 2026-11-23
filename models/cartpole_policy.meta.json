@@ -1,0 +1,70 @@
+{
+  "id": "cartpole_policy",
+  "name": "CartPole LQR Policy",
+  "description": "2-class optimal LQR CartPole feedback controller (4 -> 12 -> 12 -> 2 ReLU MLP) trained on score = -0.5*x - 0.8*v + 3.2*theta + 0.9*omega.",
+  "onnx_file": "cartpole_policy.onnx",
+  "sha256": "d8af4ee77d52a7e167c6117ab9964746b56c6b026adab0dbea3ca45eacadfc30",
+  "size_bytes": 1602,
+  "architecture": [
+    4,
+    12,
+    12,
+    2
+  ],
+  "activations": [
+    "Relu",
+    "Relu",
+    "Identity"
+  ],
+  "onnx_ops": [
+    "Gemm",
+    "Relu",
+    "Gemm",
+    "Relu",
+    "Gemm"
+  ],
+  "is_piecewise_linear": true,
+  "seed": 101,
+  "metrics": {
+    "val_accuracy": 0.999
+  },
+  "domain": {
+    "feature_names": [
+      "cart_pos",
+      "cart_vel",
+      "pole_angle",
+      "pole_ang_vel"
+    ],
+    "lower_bounds": [
+      -1.5,
+      -2.5,
+      -0.24,
+      -2.5
+    ],
+    "upper_bounds": [
+      1.5,
+      2.5,
+      0.24,
+      2.5
+    ],
+    "output_names": [
+      "logit_left",
+      "logit_right"
+    ],
+    "task_type": "classification",
+    "class_names": [
+      "LEFT",
+      "RIGHT"
+    ]
+  },
+  "recommended_config": {
+    "task_type": "classification",
+    "max_regimes": 6,
+    "max_depth": 3,
+    "max_degree": 1,
+    "tolerance_eps": 0.05,
+    "classification_margin": 0.05,
+    "verify_smt": true,
+    "smt_timeout_s": 4.0
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "id": "reactor_safety_guard",
+  "name": "Reactor Thermal/Pressure Safety Guard",
+  "description": "3-class reactor safety envelope classifier (4 -> 14 -> 12 -> 3 ReLU MLP) with input standardization fused into the first linear layer for clean Z3 SMT proofs.",
+  "onnx_file": "reactor_safety_guard.onnx",
+  "sha256": "fcf80f348c38b13ef12c6c2e1945e63e255b374c47f50f742ca4652db85a0354",
+  "size_bytes": 1792,
+  "architecture": [
+    4,
+    14,
+    12,
+    3
+  ],
+  "activations": [
+    "Relu",
+    "Relu",
+    "Identity"
+  ],
+  "onnx_ops": [
+    "Gemm",
+    "Relu",
+    "Gemm",
+    "Relu",
+    "Gemm"
+  ],
+  "is_piecewise_linear": true,
+  "seed": 303,
+  "metrics": {
+    "val_accuracy": 0.953
+  },
+  "domain": {
+    "feature_names": [
+      "core_temp_c",
+      "coolant_flow",
+      "pressure_bar",
+      "flux_rate"
+    ],
+    "lower_bounds": [
+      280.0,
+      20.0,
+      80.0,
+      0.0
+    ],
+    "upper_bounds": [
+      420.0,
+      100.0,
+      180.0,
+      1.5
+    ],
+    "output_names": [
+      "logit_normal",
+      "logit_throttle",
+      "logit_scram"
+    ],
+    "task_type": "classification",
+    "class_names": [
+      "NORMAL",
+      "THROTTLE",
+      "SCRAM"
+    ]
+  },
+  "recommended_config": {
+    "task_type": "classification",
+    "max_regimes": 8,
+    "max_depth": 4,
+    "max_degree": 1,
+    "tolerance_eps": 0.05,
+    "classification_margin": 0.1,
+    "verify_smt": true,
+    "smt_timeout_s": 4.0
+  }
+}

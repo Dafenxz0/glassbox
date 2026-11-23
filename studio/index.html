@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <title>GlassBox Studio — Neural Network Decompiler &amp; SMT Verifier</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Crect x='2' y='2' width='20' height='20' rx='3' stroke='%23111111' stroke-width='2' fill='%23ffffff'/%3E%3Cpath d='M2 12H22M12 2V22' stroke='%23111111' stroke-width='1.5' stroke-opacity='0.35'/%3E%3Cpath d='M6 18L18 6' stroke='%231a4be0' stroke-width='2.2'/%3E%3Ccircle cx='12' cy='12' r='2.2' fill='%231a4be0'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Epilogue:wght@400..700&family=JetBrains+Mono:wght@400..500&display=swap">
+  <link rel="stylesheet" href="./studio.css">
+</head>
+<body data-radius="sharp">
+  <header class="topbar">
+    <div class="topbar-brand">
+      <a href="/" class="brand-link" aria-label="GlassBox home">
+        <svg class="brand-mark" width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <rect x="2" y="2" width="20" height="20" rx="3" stroke="currentColor" stroke-width="2"></rect>
+          <path d="M2 12H22M12 2V22" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.45"></path>
+          <path d="M6 18L18 6" stroke="var(--accent)" stroke-width="2.2"></path>
+          <circle cx="12" cy="12" r="2.2" fill="var(--accent)"></circle>
+        </svg>
+        <span class="brand-wordmark">GlassBox</span>
+      </a>
+      <span class="brand-divider" aria-hidden="true">/</span>
+      <span class="brand-product">Studio</span>
+      <div id="mode-pill" class="mode-pill" data-mode="checking" role="status" aria-live="polite">
+        <span class="mode-dot" aria-hidden="true"></span>
+        <span id="mode-pill-text">Probing engine...</span>
+      </div>
+    </div>
+
+    <form id="decompile-controls" class="controls-bar">
+      <label class="ctrl-field ctrl-model">
+        <span class="ctrl-label">Model</span>
+        <select id="model-select" aria-label="Select ONNX model">
+          <option value="">Loading models...</option>
+        </select>
+      </label>
+
+      <button type="button" id="btn-open-upload" class="btn btn-secondary">Upload ONNX</button>
+
+      <label class="ctrl-field ctrl-compact">
+        <span class="ctrl-label">Regimes</span>
+        <input type="number" id="cfg-regimes" min="2" max="32" step="1" value="8">
+      </label>
+
+      <label class="ctrl-field ctrl-compact">
+        <span class="ctrl-label">Tol &epsilon;</span>
+        <input type="number" id="cfg-eps" min="0.001" max="1" step="0.005" value="0.05">
+      </label>
+
+      <label class="ctrl-check">
+        <input type="checkbox" id="cfg-smt" checked>
+        <span>Z3 SMT</span>
+      </label>
+
+      <button type="submit" id="btn-decompile" class="btn btn-primary">
+        <span>Decompile &amp; Verify</span>
+        <span aria-hidden="true">&rarr;</span>
+      </button>
+
+      <button type="button" id="btn-open-cert" class="btn btn-secondary">Certificate</button>
+
+      <button type="button" id="btn-theme" class="btn btn-ghost" aria-label="Toggle color theme" title="Toggle Light / Dark theme">
+        <span id="theme-label">Theme</span>
+      </button>
+    </form>
+  </header>
+
+  <div id="status-banner" class="status-banner" hidden>
+    <span id="status-banner-text"></span>
+    <button type="button" id="status-banner-dismiss" class="btn-icon" aria-label="Dismiss notice">&times;</button>
+  </div>
+
+  <main class="workbench">
+    <!-- LEFT PANE: Verification Status, ONNX Stack, Operating Regimes, CEGIS Chart -->
+    <aside class="pane pane-left" aria-label="Model overview, operating regimes, and CEGIS convergence">
+      <section class="card">
+        <div class="card-head">
+          <h2 class="card-title">Verification Status</h2>
+          <span id="verif-badge" class="status-badge" data-status="UNVERIFIED">UNVERIFIED</span>
+        </div>
+        <div class="kpi-grid">
+          <div class="kpi-cell">
+            <span class="kpi-label">Agreement</span>
+            <span id="kpi-agreement" class="kpi-value mono">—</span>
+          </div>
+          <div class="kpi-cell">
+            <span class="kpi-label">Max Error |&Delta;|</span>
+            <span id="kpi-max-err" class="kpi-value mono">—</span>
+          </div>
+          <div class="kpi-cell">
+            <span class="kpi-label">SMT Proof</span>
+            <span id="kpi-smt" class="kpi-value mono">—</span>
+          </div>
+          <div class="kpi-cell">
+            <span class="kpi-label">Counterexamples</span>
+            <span id="kpi-ce-count" class="kpi-value mono">—</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2 class="card-title">ONNX Layer Stack</h2>
+          <span id="model-pwl-badge" class="tag-pill">—</span>
+        </div>
+        <div id="model-meta-summary" class="meta-kv"></div>
+        <ol id="layer-stack" class="layer-stack"></ol>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2 class="card-title">Operating Regimes</h2>
+          <div class="card-head-actions">
+            <span id="regime-count-pill" class="tag-pill">0</span>
+            <button type="button" id="btn-clear-regime" class="btn-link" hidden>Clear</button>
+          </div>
+        </div>
+        <p class="card-sub">Click a regime to highlight its code lines, graph leaf, and 2D input region.</p>
+        <div id="regime-list" class="regime-list" role="list"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2 class="card-title">CEGIS Convergence</h2>
+          <span id="cegis-iter-pill" class="tag-pill">0 iters</span>
+        </div>
+        <div class="chart-wrap">
+          <svg id="cegis-chart" class="cegis-chart" viewBox="0 0 320 156" role="img" aria-label="CEGIS iteration convergence chart"></svg>
+        </div>
+        <div id="cegis-legend" class="chart-legend">
+          <span class="legend-item"><span class="legend-swatch swatch-blue"></span>Agreement %</span>
+          <span class="legend-item"><span class="legend-swatch swatch-amber"></span>Max |&Delta;|</span>
+          <span class="legend-item"><span class="legend-swatch swatch-emerald"></span>Tol &epsilon;</span>
+        </div>
+      </section>
+    </aside>
+
+    <!-- CENTER PANE: Accessible Code Workbench & Regime Graph -->
+    <section class="pane pane-center" aria-label="Decompiled code workbench">
+      <div class="workbench-shell">
+        <div class="workbench-header">
+          <div focusgroup="tablist nomemory" role="tablist" aria-label="Decompiled targets" class="tablist">
+            <button type="button" role="tab" id="tab-c" aria-selected="true" focusgroupstart>C99 (.c)</button>
+            <button type="button" role="tab" id="tab-h" aria-selected="false">Header (.h)</button>
+            <button type="button" role="tab" id="tab-rust" aria-selected="false">Rust (.rs)</button>
+            <button type="button" role="tab" id="tab-python" aria-selected="false">Python (.py)</button>
+            <button type="button" role="tab" id="tab-graph" aria-selected="false">Regime Graph</button>
+            <button type="button" role="tab" id="tab-cert" aria-selected="false">Certificate JSON</button>
+          </div>
+          <div class="workbench-actions">
+            <span id="active-file-meta" class="file-meta mono">—</span>
+            <button type="button" id="btn-copy-code" class="btn btn-sm btn-secondary">Copy</button>
+            <button type="button" id="btn-download-code" class="btn btn-sm btn-secondary">Download</button>
+          </div>
+        </div>
+
+        <div class="panels-stage">
+          <div role="tabpanel" aria-labelledby="tab-c" tabindex="0">
+            <div class="panel-body code-panel-body">
+              <div id="code-c" class="code-view" data-lang="c"></div>
+            </div>
+          </div>
+
+          <div role="tabpanel" aria-labelledby="tab-h" tabindex="0" hidden="until-found">
+            <div class="panel-body code-panel-body">
+              <div id="code-h" class="code-view" data-lang="c"></div>
+            </div>
+          </div>
+
+          <div role="tabpanel" aria-labelledby="tab-rust" tabindex="0" hidden="until-found">
+            <div class="panel-body code-panel-body">
+              <div id="code-rust" class="code-view" data-lang="rust"></div>
+            </div>
+          </div>
+
+          <div role="tabpanel" aria-labelledby="tab-python" tabindex="0" hidden="until-found">
+            <div class="panel-body code-panel-body">
+              <div id="code-python" class="code-view" data-lang="python"></div>
+            </div>
+          </div>
+
+          <div role="tabpanel" aria-labelledby="tab-graph" tabindex="0" hidden="until-found">
+            <div class="panel-body graph-panel-body">
+              <div class="graph-toolbar">
+                <span class="graph-hint">Vector IR tree from <code>program.root</code>. Click a leaf to inspect its regime.</span>
+                <div class="graph-zoom-group">
+                  <button type="button" id="btn-zoom-out" class="btn btn-sm btn-secondary" aria-label="Zoom out graph">&minus;</button>
+                  <button type="button" id="btn-zoom-reset" class="btn btn-sm btn-secondary">100%</button>
+                  <button type="button" id="btn-zoom-in" class="btn btn-sm btn-secondary" aria-label="Zoom in graph">+</button>
+                </div>
+              </div>
+              <div id="regime-graph-viewport" class="graph-viewport">
+                <svg id="regime-graph-svg" class="regime-graph-svg" role="img" aria-label="Decompiled Regime Decision Tree"></svg>
+              </div>
+            </div>
+          </div>
+
+          <div role="tabpanel" aria-labelledby="tab-cert" tabindex="0" hidden="until-found">
+            <div class="panel-body code-panel-body">
+              <div id="code-cert" class="code-view" data-lang="json"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT PANE: 2D Input-Space MRI, Counterexamples, Benchmarks -->
+    <aside class="pane pane-right" aria-label="Input-space MRI, counterexamples, and benchmarks">
+      <section class="card">
+        <div class="card-head">
+          <h2 class="card-title">2D Input-Space MRI</h2>
+          <label class="inline-select">
+            <span class="sr-only">Heatmap layer</span>
+            <select id="mri-view-select" aria-label="Heatmap view mode">
+              <option value="diff_grid">Error |&Delta;|</option>
+              <option value="nn_grid">NN Output</option>
+              <option value="prog_grid">Code Output</option>
+              <option value="regime_grid">Regime Map</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="slice-axes">
+          <label class="ctrl-field">
+            <span class="ctrl-label">X Axis</span>
+            <select id="slice-dim-x" aria-label="Slice X dimension"></select>
+          </label>
+          <label class="ctrl-field">
+            <span class="ctrl-label">Y Axis</span>
+            <select id="slice-dim-y" aria-label="Slice Y dimension"></select>
+          </label>
+        </div>
+
+        <div id="slice-sliders" class="slice-sliders"></div>
+        <p id="slice-mode-note" class="slice-note" hidden></p>
+
+        <div class="mri-frame">
+          <div class="mri-y-label" id="mri-y-label">y</div>
+          <div class="mri-canvas-col">
+            <div class="mri-canvas-wrap">
+              <canvas id="mri-canvas" width="384" height="384"></canvas>
+            </div>
+            <div class="mri-axis-ticks" id="mri-x-ticks">
+              <span>—</span><span>—</span><span>—</span>
+            </div>
+            <div class="mri-x-label" id="mri-x-label">x</div>
+          </div>
+        </div>
+
+        <div id="mri-legend" class="mri-legend"></div>
+        <div id="mri-readout" class="mri-readout mono">Hover canvas to inspect coordinates, NN vs Code values, and regime.</div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2 class="card-title">Counterexamples</h2>
+          <span id="ce-total-pill" class="tag-pill">0</span>
+        </div>
+        <div class="table-wrap">
+          <table class="ce-table">
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>x*</th>
+                <th>NN</th>
+                <th>Code</th>
+                <th>|&Delta;|</th>
+                <th>State</th>
+              </tr>
+            </thead>
+            <tbody id="ce-tbody">
+              <tr><td colspan="6" class="empty-cell">No counterexamples recorded.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2 class="card-title">Native Runtime Benchmarks</h2>
+          <span class="tag-pill">p50 &mu;s</span>
+        </div>
+        <div id="bench-list" class="bench-list"></div>
+      </section>
+    </aside>
+  </main>
+
+  <!-- UPLOAD ONNX DIALOG -->
+  <dialog id="upload-dialog" class="studio-dialog" closedby="any" aria-labelledby="upload-dialog-title">
+    <div class="dialog-header">
+      <h2 id="upload-dialog-title" class="dialog-title">Upload ONNX Model</h2>
+      <button type="button" class="btn-icon dialog-close" data-close-dialog="upload-dialog" aria-label="Close upload dialog">&times;</button>
+    </div>
+    <form id="upload-form" class="dialog-body">
+      <p id="upload-static-warning" class="dialog-notice" hidden>
+        Static Demo Mode is active. Model upload requires running <code>glassbox studio</code> locally.
+      </p>
+      <label class="form-field">
+        <span class="ctrl-label">ONNX File (.onnx, max 20 MB)</span>
+        <input type="file" id="upload-file" accept=".onnx" required>
+      </label>
+      <label class="form-field">
+        <span class="ctrl-label">Optional DomainSpec JSON</span>
+        <textarea id="upload-domain-json" rows="6" class="mono" placeholder='{"feature_names":["x0","x1"],"lower_bounds":[-1,-1],"upper_bounds":[1,1],"output_names":["y0"],"task_type":"regression"}'></textarea>
+      </label>
+      <p id="upload-error" class="dialog-error" hidden></p>
+      <div class="dialog-footer">
+        <button type="button" class="btn btn-secondary" data-close-dialog="upload-dialog">Cancel</button>
+        <button type="submit" id="btn-upload-submit" class="btn btn-primary">Upload Model</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- VERIFICATION CERTIFICATE DIALOG -->
+  <dialog id="cert-dialog" class="studio-dialog studio-dialog-wide" closedby="any" aria-labelledby="cert-dialog-title">
+    <div class="dialog-header">
+      <h2 id="cert-dialog-title" class="dialog-title">Verification Certificate</h2>
+      <button type="button" class="btn-icon dialog-close" data-close-dialog="cert-dialog" aria-label="Close certificate dialog">&times;</button>
+    </div>
+    <div class="dialog-body">
+      <div id="cert-dialog-content" class="cert-summary"></div>
+      <div class="dialog-footer">
+        <button type="button" id="btn-download-cert" class="btn btn-secondary">Download Certificate JSON</button>
+        <button type="button" class="btn btn-primary" data-close-dialog="cert-dialog">Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>

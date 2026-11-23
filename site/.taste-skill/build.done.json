@@ -1,0 +1,11 @@
+{
+ "page": "index.html",
+ "url": null,
+ "root": null,
+ "kind": "software",
+ "category": "Neural network to C and Rust decompiler",
+ "primary": "Open GlassBox Studio",
+ "rounds": 3,
+ "start": "2026-11-23T08:32:59.068Z",
+ "by": "gate.mjs --start"
+}
