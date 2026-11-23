@@ -438,3 +438,42 @@ def test_tanh_skips_smt_and_pareto_frontier(tmp_path: Path) -> None:
     stats, cexs = evaluate_and_falsify(model, crude, cfg, iteration=0)
     assert stats.num_samples >= 4096
     assert len(cexs) > 0
+
+def test_shipped_bundle_checks_without_claiming_a_solver_replay(tmp_path: Path) -> None:
+    import json
+    import shutil
+
+    shipped = Path(__file__).resolve().parents[1] / "bundles" / "drone_altitude_pid.gbundle"
+    bundle = tmp_path / shipped.name
+    shutil.copytree(shipped, bundle)
+    result = verify_artifact_bundle(bundle, recompute_smt=False)
+    assert result.verdict == "ARTIFACTS_CHECKED"
+    assert result.replayed_status == VerificationStatus.UNVERIFIED
+    assert result.hashes_valid and result.numerical_checks_passed and not result.smt_replayed
+
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["files"]["code/model.rs"]
+    manifest_path.write_text(json.dumps(manifest))
+    assert verify_artifact_bundle(bundle, recompute_smt=False).verdict == "HASH_MISMATCH"
+
+def test_longer_replay_can_resolve_an_inconclusive_certificate(tmp_path: Path) -> None:
+    import json
+    import shutil
+
+    shipped = Path(__file__).resolve().parents[1] / "bundles" / "drone_altitude_pid.gbundle"
+    bundle = tmp_path / shipped.name
+    shutil.copytree(shipped, bundle)
+    certificate_path = bundle / "certificate.json"
+    certificate = json.loads(certificate_path.read_text())
+    certificate.update(status="TIMEOUT", smt_proven=False, real_arithmetic_proof=None)
+    certificate_path.write_text(json.dumps(certificate))
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"]["certificate.json"] = compute_file_sha256(certificate_path)
+    manifest_path.write_text(json.dumps(manifest))
+
+    result = verify_artifact_bundle(bundle, smt_timeout_s=30)
+    assert result.verdict == "REPLAY_RESOLVED"
+    assert result.claimed_status == VerificationStatus.TIMEOUT
+    assert result.replayed_status == VerificationStatus.PROVEN_REAL_GLOBAL

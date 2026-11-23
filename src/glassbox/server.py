@@ -18,14 +18,13 @@ import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, FiniteFloat, ValidationError
 
 from glassbox import __version__
 from glassbox.cli import run_decompile_pipeline
 from glassbox.ir import DecompileResult
 from glassbox.types import (
     CEGISIteration,
-    DecisionExplanation,
     DecompileConfig,
     DomainSpec,
     TaskType,
@@ -51,7 +50,7 @@ class SliceRequest(BaseModel):
     run_id: str
     dim_x: int
     dim_y: int
-    fixed_values: list[float] | None = None
+    fixed_values: list[FiniteFloat] | None = None
     resolution: int = 48
 
 
@@ -59,7 +58,7 @@ class ExplainRequest(BaseModel):
     """Request payload for deterministic single-input decision explanation."""
 
     run_id: str
-    x: list[float]
+    x: list[FiniteFloat]
 
 
 def _z3_available() -> bool:
@@ -75,39 +74,12 @@ def _sse_frame(event: str, payload: Any) -> str:
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
 
-def _fallback_explain_decision(
-    model: Any,
-    result: DecompileResult,
-    x: list[float],
-    leaf_proven_map: dict[int, bool] | None,
-) -> DecisionExplanation:
-    prog_out, leaf, guard_trace = result.program.trace_one(x)
-    x_arr = np.asarray([x], dtype=np.float64)
-    nn_out = [float(v) for v in model.predict(x_arr)[0]] if model is not None else list(prog_out)
-    abs_err = float(max(abs(a - b) for a, b in zip(nn_out, prog_out))) if nn_out else 0.0
-    is_cls = result.metadata.domain.task_type == TaskType.CLASSIFICATION
-    nn_cls = int(model.predict_classes(x_arr)[0]) if (is_cls and model is not None) else None
-    prog_cls = int(result.program.predict_classes(x_arr)[0]) if is_cls else None
-    proven = bool(leaf_proven_map.get(leaf.regime_id, False)) if leaf_proven_map else False
-    formula_trace = [
-        {"output_name": oname, "value": float(val)}
-        for oname, val in zip(result.metadata.domain.output_names, prog_out)
-    ]
-    return DecisionExplanation(
-        x=[float(v) for v in x],
-        regime_id=leaf.regime_id,
-        regime_name=leaf.name,
-        regime_proven=proven,
-        guard_trace=guard_trace,
-        formula_trace=formula_trace,
-        nn_output=nn_out,
-        program_output=[float(v) for v in prog_out],
-        nn_class=nn_cls,
-        program_class=prog_cls,
-        abs_error=abs_err,
-        active_neurons=[],
-        summary_text=f"Routed to regime #{leaf.regime_id} ({leaf.name}); max |Δ| = {abs_err:.5f}.",
-    )
+def _check_domain_point(domain: DomainSpec, point: list[float]) -> None:
+    if len(point) != domain.input_dim:
+        raise HTTPException(400, f"Expected {domain.input_dim} input coordinates")
+    for name, value, lo, hi in zip(domain.feature_names, point, domain.lower_bounds, domain.upper_bounds):
+        if not lo <= value <= hi:
+            raise HTTPException(400, f"{name} must be within [{lo}, {hi}]")
 
 
 def compute_slice_payload(
@@ -128,17 +100,16 @@ def compute_slice_payload(
             detail=f"dim_x ({dim_x}) and dim_y ({dim_y}) must be in [0, {d - 1}]",
         )
 
+    if dim_x == dim_y:
+        raise HTTPException(400, "A 2D slice requires two different dimensions")
+
     res = max(8, min(80, int(resolution)))
     if fixed_values is None:
         base = [
             0.5 * (lo + hi) for lo, hi in zip(domain.lower_bounds, domain.upper_bounds)
         ]
     else:
-        if len(fixed_values) != d:
-            raise HTTPException(
-                status_code=400,
-                detail=f"fixed_values length ({len(fixed_values)}) must match input_dim ({d})",
-            )
+        _check_domain_point(domain, fixed_values)
         base = [float(v) for v in fixed_values]
 
     x_vals = np.linspace(domain.lower_bounds[dim_x], domain.upper_bounds[dim_x], res)
@@ -221,6 +192,7 @@ def create_app(
     uploaded_domains: dict[str, DomainSpec] = {}
     model_cache: dict[str, Any] = {}
     run_cache: dict[str, dict[str, Any]] = {}
+    bundle_lock = threading.Lock()
 
     def _load_model_entry(model_id: str) -> Any:
         from glassbox.loader import load_onnx
@@ -272,11 +244,9 @@ def create_app(
         try:
             model_obj = _load_model_entry(model_id)
         except HTTPException:
-            p = Path(result.metadata.path)
-            if p.is_file():
-                from glassbox.loader import load_onnx
-
-                model_obj = load_onnx(p, domain=result.metadata.domain)
+            pass
+        if model_obj is not None and model_obj.metadata.sha256 != result.certificate.model_sha256:
+            model_obj = None
         if model_obj is not None:
             run_cache[run_id] = {"result": result, "model": model_obj}
         return result, model_obj
@@ -483,18 +453,19 @@ def create_app(
     def get_run_bundle(run_id: str) -> dict[str, Any]:
         result, model_obj = _load_run_entry(run_id)
         stem = _sanitize_id(result.metadata.name or run_id)
-        bundle_dir = resolved_bundles / f"{stem}.gbundle"
-        if not bundle_dir.is_dir():
-            bundle_dir = upload_dir / f"{_sanitize_id(run_id)}.gbundle"
-            if not bundle_dir.is_dir() and model_obj is not None:
-                try:
-                    from glassbox.certificate import write_artifact_bundle
+        packaged = resolved_bundles / f"{stem}.gbundle"
+        packaged_cert = packaged / "certificate.json"
+        use_packaged = (
+            run_id == stem and packaged_cert.is_file()
+            and json.loads(packaged_cert.read_text(encoding="utf-8")) == result.certificate.model_dump(mode="json")
+        )
+        bundle_dir = packaged if use_packaged else upload_dir / f"{_sanitize_id(run_id)}.gbundle"
+        if not use_packaged and model_obj is not None:
+            from glassbox.certificate import write_artifact_bundle
 
-                    model_path = Path(getattr(model_obj, "path", result.metadata.path))
-                    if model_path.is_file():
-                        write_artifact_bundle(result, model_path, bundle_dir)
-                except (ImportError, OSError):
-                    pass
+            with bundle_lock:
+                if not (bundle_dir / "manifest.json").is_file():
+                    write_artifact_bundle(result, model_obj.path, bundle_dir)
 
         manifest_path = bundle_dir / "manifest.json"
         manifest_data: dict[str, Any] | None = None
@@ -513,8 +484,8 @@ def create_app(
             "run_id": result.run_id,
             "model_name": result.metadata.name,
             "bundle_available": manifest_data is not None,
-            "bundle_path": f"bundles/{stem}.gbundle",
-            "cli_verify_command": f"glassbox verify bundles/{stem}.gbundle",
+            "bundle_path": str(bundle_dir) if manifest_data else None,
+            "cli_verify_command": f'glassbox verify "{bundle_dir}"' if manifest_data else None,
             "manifest": manifest_data,
             "verification": verification_data,
         }
@@ -522,28 +493,16 @@ def create_app(
     @app.post("/api/explain")
     def explain_point(req: ExplainRequest) -> dict[str, Any]:
         result, model_obj = _load_run_entry(req.run_id)
-        d = result.metadata.input_dim
-        if len(req.x) != d:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Expected input vector x of length {d}, got {len(req.x)}",
-            )
-        leaf_map = (
-            result.certificate.real_arithmetic_proof.leaf_proven_map
-            if result.certificate.real_arithmetic_proof is not None
-            else None
-        )
-        if model_obj is not None:
-            try:
-                from glassbox.loader import explain_decision
+        _check_domain_point(result.metadata.domain, req.x)
+        if model_obj is None:
+            raise HTTPException(404, "Matching source ONNX model is unavailable for this run")
+        from glassbox.loader import explain_decision
 
-                exp = explain_decision(
-                    model_obj, result.program, req.x, leaf_proven_map=leaf_map
-                )
-                return exp.model_dump(mode="json")
-            except ImportError:
-                pass
-        exp = _fallback_explain_decision(model_obj, result, req.x, leaf_map)
+        proof = result.certificate.real_arithmetic_proof
+        exp = explain_decision(
+            model_obj, result.program, req.x,
+            leaf_proven_map=proof.leaf_proven_map if proof else None,
+        )
         return exp.model_dump(mode="json")
 
     @app.post("/api/slice")

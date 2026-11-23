@@ -534,7 +534,7 @@ def verify_bundle_cmd(
         smt_timeout_s=timeout,
     )
 
-    verdict_ok = report.verdict == "VERIFIED_REPRODUCED"
+    verdict_ok = report.verdict in {"VERIFIED_REPRODUCED", "ARTIFACTS_CHECKED", "REPLAY_RESOLVED"}
     verdict_style = "bold green" if verdict_ok else "bold red"
 
     table = Table(
@@ -550,7 +550,7 @@ def verify_bundle_cmd(
         "[green]YES[/green]" if report.hashes_valid else "[red]NO[/red]",
     )
     table.add_row("Claimed Status", report.claimed_status.value)
-    table.add_row("Replayed Status", report.replayed_status.value)
+    table.add_row("Replayed Status", report.replayed_status.value if report.smt_replayed else "Skipped")
     table.add_row(
         "Exact Rational Z3 Replay",
         "[green]REPLAYED[/green]" if report.smt_replayed else "[yellow]SKIPPED[/yellow]",

@@ -4,33 +4,29 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="light dark">
-  <title>GlassBox Studio 2.0 — Neural Network Decompiler &amp; Real-Arithmetic SMT Verifier</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Crect x='2' y='2' width='20' height='20' rx='3' stroke='%23111111' stroke-width='2' fill='%23ffffff'/%3E%3Cpath d='M2 12H22M12 2V22' stroke='%23111111' stroke-width='1.5' stroke-opacity='0.35'/%3E%3Cpath d='M6 18L18 6' stroke='%231a4be0' stroke-width='2.2'/%3E%3Ccircle cx='12' cy='12' r='2.2' fill='%231a4be0'/%3E%3C/svg%3E">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Epilogue:wght@400..700&family=JetBrains+Mono:wght@400..500&display=swap">
+  <title>GlassBox Studio | ONNX verification workbench</title>
+  <meta name="description" content="Explore source code, decision regions and verification evidence for a bounded ONNX model.">
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./studio.css">
 </head>
-<body data-radius="sharp">
+<body>
+  <a class="studio-skip" href="#workspace-heading">Skip to workbench</a>
   <header class="topbar">
     <div class="topbar-brand">
-      <a href="../" class="brand-link" aria-label="GlassBox home">
-        <svg class="brand-mark" width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <rect x="2" y="2" width="20" height="20" rx="3" stroke="currentColor" stroke-width="2"></rect>
-          <path d="M2 12H22M12 2V22" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.45"></path>
-          <path d="M6 18L18 6" stroke="var(--accent)" stroke-width="2.2"></path>
-          <circle cx="12" cy="12" r="2.2" fill="var(--accent)"></circle>
-        </svg>
-        <span class="brand-wordmark">GlassBox</span>
-      </a>
-      <span class="brand-divider" aria-hidden="true">/</span>
-      <span class="brand-product">Studio 2.0</span>
+      <a href="../" class="brand-link"><img width="30" height="30" src="../favicon.svg" alt="">GlassBox</a>
+      <span class="brand-divider">/</span><span class="brand-product">Studio</span>
+    </div>
+    <div class="header-tools">
       <div id="mode-pill" class="mode-pill" data-mode="checking" role="status" aria-live="polite">
         <span class="mode-dot" aria-hidden="true"></span>
         <span id="mode-pill-text">Probing engine...</span>
       </div>
     </div>
 
+    <button type="button" id="btn-theme" class="btn btn-ghost" aria-label="Toggle color theme"><span id="theme-label">Theme</span></button>
+  </header>
+  <section class="run-header" id="workspace-heading" tabindex="-1" aria-labelledby="run-title">
+    <div class="run-heading"><p>Verification workbench</p><h1 id="run-title">Loading models…</h1></div>
     <form id="decompile-controls" class="controls-bar">
       <label class="ctrl-field ctrl-model">
         <span class="ctrl-label">Model</span>
@@ -42,13 +38,13 @@
       <button type="button" id="btn-open-upload" class="btn btn-secondary">Upload ONNX</button>
 
       <label class="ctrl-field ctrl-compact">
-        <span class="ctrl-label">Regimes</span>
+        <span class="ctrl-label">Regime budget</span>
         <input type="number" id="cfg-regimes" min="2" max="32" step="1" value="8">
       </label>
 
       <label class="ctrl-field ctrl-compact">
-        <span class="ctrl-label">Tol &epsilon;</span>
-        <input type="number" id="cfg-eps" min="0.001" max="1" step="0.005" value="0.05">
+        <span class="ctrl-label">Tolerance &epsilon;</span>
+        <input type="number" id="cfg-eps" min="0.001" step="any" value="0.05">
       </label>
 
       <label class="ctrl-check">
@@ -56,30 +52,31 @@
         <span>Z3 SMT</span>
       </label>
 
-      <button type="submit" id="btn-decompile" class="btn btn-primary">
+      <button type="submit" id="btn-decompile" disabled class="btn btn-primary">
         <span>Decompile &amp; Verify</span>
-        <span aria-hidden="true">&rarr;</span>
       </button>
 
-      <button type="button" id="btn-open-cert" class="btn btn-secondary">Certificate</button>
+      <button type="button" id="btn-open-cert" disabled class="btn btn-secondary">Certificate</button>
 
-      <button type="button" id="btn-theme" class="btn btn-ghost" aria-label="Toggle color theme" title="Toggle Light / Dark theme">
-        <span id="theme-label">Theme</span>
-      </button>
     </form>
-  </header>
+  </section>
+  <div class="pane-switch" role="group" aria-label="Workspace view">
+    <button type="button" data-pane="overview" aria-pressed="true">Overview</button>
+    <button type="button" data-pane="code" aria-pressed="false">Source code</button>
+    <button type="button" data-pane="explore" aria-pressed="false">Input space</button>
+  </div>
 
-  <div id="status-banner" class="status-banner" hidden>
+  <div id="status-banner" class="status-banner" role="status" hidden>
     <span id="status-banner-text"></span>
     <button type="button" id="status-banner-dismiss" class="btn-icon" aria-label="Dismiss notice">&times;</button>
   </div>
 
-  <main class="workbench">
+  <main id="workbench" class="workbench" data-view="overview" hidden>
     <!-- LEFT PANE: Two-Tier Verification Status, Pareto Frontier, Operating Regimes (+ Neuron Badges), ONNX Stack, CEGIS Chart -->
     <aside class="pane pane-left" aria-label="Verification status, Pareto frontier, operating regimes, and CEGIS convergence">
       <section class="card">
         <div class="card-head">
-          <h2 class="card-title">Verification Guarantee</h2>
+          <h2 class="card-title">Verification result</h2>
           <span id="verif-badge" class="status-badge" data-status="UNVERIFIED">UNVERIFIED</span>
         </div>
         <p id="verif-tier-subtitle" class="verif-tier-sub">Awaiting verification run.</p>
@@ -89,11 +86,11 @@
             <span id="kpi-agreement" class="kpi-value mono">—</span>
           </div>
           <div class="kpi-cell">
-            <span class="kpi-label">Max Error |&Delta;|</span>
+            <span class="kpi-label">Max sampled |&Delta;|</span>
             <span id="kpi-max-err" class="kpi-value mono">—</span>
           </div>
           <div class="kpi-cell">
-            <span class="kpi-label">Rational Z3 Proof</span>
+            <span class="kpi-label">Z3 result</span>
             <span id="kpi-smt" class="kpi-value mono">—</span>
           </div>
           <div class="kpi-cell">
@@ -105,13 +102,13 @@
 
       <section class="card" id="pareto-card">
         <div class="card-head">
-          <h2 class="card-title">Certified Pareto Frontier</h2>
+          <h2 class="card-title">Pareto frontier</h2>
           <div class="card-head-actions">
             <span id="pareto-count-pill" class="tag-pill">0 pts</span>
             <button type="button" id="btn-reset-pareto" class="btn-link" hidden>Return to Best Program</button>
           </div>
         </div>
-        <p class="card-sub">Complexity (AST nodes) vs Max Error |&Delta;|. Click a point to preview its C99/Rust/Python code.</p>
+        <p class="card-sub">Complexity (AST nodes) vs Max sampled |&Delta;|. Click a point to preview its C99/Rust/Python code.</p>
         <div class="chart-wrap">
           <svg id="pareto-chart" class="pareto-chart" viewBox="0 0 320 156" role="img" aria-label="Pareto frontier complexity vs error scatter plot"></svg>
         </div>
@@ -120,7 +117,7 @@
 
       <section class="card">
         <div class="card-head">
-          <h2 class="card-title">Operating Regimes &amp; Neurons</h2>
+          <h2 class="card-title">Operating regimes</h2>
           <div class="card-head-actions">
             <span id="regime-count-pill" class="tag-pill">0</span>
             <button type="button" id="btn-clear-regime" class="btn-link" hidden>Clear</button>
@@ -150,21 +147,22 @@
         <div id="cegis-legend" class="chart-legend">
           <span class="legend-item"><span class="legend-swatch swatch-blue"></span>Agreement %</span>
           <span class="legend-item"><span class="legend-swatch swatch-amber"></span>Max |&Delta;|</span>
-          <span class="legend-item"><span class="legend-swatch swatch-emerald"></span>Tol &epsilon;</span>
+          <span class="legend-item"><span class="legend-swatch swatch-emerald"></span>Tolerance &epsilon;</span>
         </div>
       </section>
     </aside>
 
-    <!-- CENTER PANE: Accessible Code Workbench & Regime Graph -->
+    <!-- CENTER PANE: Accessible Code Workbench & Graph -->
     <section class="pane pane-center" aria-label="Decompiled code workbench">
       <div class="workbench-shell">
         <div class="workbench-header">
-          <div focusgroup="tablist nomemory" role="tablist" aria-label="Decompiled targets" class="tablist">
-            <button type="button" role="tab" id="tab-c" aria-selected="true" focusgroupstart>C99 (.c)</button>
-            <button type="button" role="tab" id="tab-h" aria-selected="false">Header (.h)</button>
-            <button type="button" role="tab" id="tab-rust" aria-selected="false">Rust (.rs)</button>
-            <button type="button" role="tab" id="tab-python" aria-selected="false">Python (.py)</button>
-            <button type="button" role="tab" id="tab-graph" aria-selected="false">Regime Graph</button>
+          <div class="source-heading">Generated source</div>
+          <div role="tablist" aria-label="Decompiled targets" class="tablist">
+            <button type="button" role="tab" id="tab-c" aria-selected="true">C99</button>
+            <button type="button" role="tab" id="tab-h" aria-selected="false">Header</button>
+            <button type="button" role="tab" id="tab-rust" aria-selected="false">Rust</button>
+            <button type="button" role="tab" id="tab-python" aria-selected="false">Python</button>
+            <button type="button" role="tab" id="tab-graph" aria-selected="false">Graph</button>
             <button type="button" role="tab" id="tab-cert" aria-selected="false">Certificate JSON</button>
           </div>
           <div class="workbench-actions">
@@ -186,25 +184,25 @@
             </div>
           </div>
 
-          <div role="tabpanel" aria-labelledby="tab-h" tabindex="0" hidden="until-found">
+          <div role="tabpanel" aria-labelledby="tab-h" tabindex="0" hidden>
             <div class="panel-body code-panel-body">
               <div id="code-h" class="code-view" data-lang="c"></div>
             </div>
           </div>
 
-          <div role="tabpanel" aria-labelledby="tab-rust" tabindex="0" hidden="until-found">
+          <div role="tabpanel" aria-labelledby="tab-rust" tabindex="0" hidden>
             <div class="panel-body code-panel-body">
               <div id="code-rust" class="code-view" data-lang="rust"></div>
             </div>
           </div>
 
-          <div role="tabpanel" aria-labelledby="tab-python" tabindex="0" hidden="until-found">
+          <div role="tabpanel" aria-labelledby="tab-python" tabindex="0" hidden>
             <div class="panel-body code-panel-body">
               <div id="code-python" class="code-view" data-lang="python"></div>
             </div>
           </div>
 
-          <div role="tabpanel" aria-labelledby="tab-graph" tabindex="0" hidden="until-found">
+          <div role="tabpanel" aria-labelledby="tab-graph" tabindex="0" hidden>
             <div class="panel-body graph-panel-body">
               <div class="graph-toolbar">
                 <span class="graph-hint">Vector IR tree from <code>program.root</code>. Click a leaf to inspect its regime.</span>
@@ -220,7 +218,7 @@
             </div>
           </div>
 
-          <div role="tabpanel" aria-labelledby="tab-cert" tabindex="0" hidden="until-found">
+          <div role="tabpanel" aria-labelledby="tab-cert" tabindex="0" hidden>
             <div class="panel-body code-panel-body">
               <div id="code-cert" class="code-view" data-lang="json"></div>
             </div>
@@ -229,11 +227,11 @@
       </div>
     </section>
 
-    <!-- RIGHT PANE: 2D Input-Space MRI, Explain This Decision + Neuron Attribution, Counterexamples, 6-Row Honest Benchmarks -->
+    <!-- RIGHT PANE: Input-space slice, Decision trace + Neuron Attribution, Counterexamples, 6-Row Honest Benchmarks -->
     <aside class="pane pane-right" aria-label="Input-space MRI, decision explanation, counterexamples, and benchmarks">
       <section class="card">
         <div class="card-head">
-          <h2 class="card-title">2D Input-Space MRI</h2>
+          <h2 class="card-title">Input-space slice</h2>
           <label class="inline-select">
             <span class="sr-only">Heatmap layer</span>
             <select id="mri-view-select" aria-label="Heatmap view mode">
@@ -279,13 +277,13 @@
       <!-- EXPLAIN THIS DECISION & RULE-TO-NEURON ATTRIBUTION -->
       <section class="card" id="explain-card">
         <div class="card-head">
-          <h2 class="card-title">Explain This Decision</h2>
+          <h2 class="card-title">Decision trace</h2>
           <span id="explain-regime-badge" class="status-badge" data-status="UNVERIFIED">Regime —</span>
         </div>
         <p class="card-sub">Deterministic guard trace, formula evaluation &amp; ONNX hidden neuron attribution (zero LLM).</p>
         <div id="explain-sample-pills" class="explain-sample-pills"></div>
         <div id="explain-content" class="explain-content">
-          <p class="card-sub">Click any point on the 2D MRI canvas or a counterexample row to trace its causal path.</p>
+          <p class="card-sub">Click any point on the input-space map or a counterexample row to trace its causal path.</p>
         </div>
       </section>
 
@@ -315,7 +313,7 @@
 
       <section class="card">
         <div class="card-head">
-          <h2 class="card-title">Native Runtime Benchmarks</h2>
+          <h2 class="card-title">Runtime benchmarks</h2>
           <span class="tag-pill">Measured inf/s</span>
         </div>
         <div id="bench-list" class="bench-list"></div>

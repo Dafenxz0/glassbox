@@ -24,18 +24,13 @@ jobs:
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
-      - name: Assemble _site payload (Landing + Interactive Studio 2.0)
-        run: |
-          rm -rf _site
-          mkdir -p _site/studio
-          rsync -a --exclude='.taste-skill' --exclude='shots' site/ _site/
-          rsync -a studio/ _site/studio/
-          touch _site/.nojekyll
+      - name: Assemble landing page and Studio
+        run: python scripts/build_web.py
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: _site
+          path: dist
 
   deploy:
     environment:

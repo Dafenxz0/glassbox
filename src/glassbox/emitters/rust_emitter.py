@@ -45,7 +45,7 @@ def _emit_rust_tree(
             f"(samples={node.sample_count}, local_err={node.local_error:.6g})"
         )
         for idx, expr in enumerate(node.output_exprs):
-            rendered = render_expr(expr, feat_names, _RUST_DIALECT)
+            rendered = render_expr(expr, feat_names, _RUST_DIALECT, group=False)
             lines.append(f"{pad}let out_{idx}: f64 = {rendered};")
         if is_cls:
             if node.class_id is not None:
@@ -115,7 +115,7 @@ def emit_rust(
 
     lines = [
         f"// Auto-generated Rust implementation by GlassBox for {program.name}",
-        "#![cfg_attr(not(test), no_std)]",
+        *([] if used_ops & {"tanh", "sin", "cos"} else ["#![cfg_attr(not(test), no_std)]"]),
         "",
     ]
 

@@ -5,6 +5,13 @@ All notable changes to GlassBox will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- Studio links directly to each recorded model, provides separate mobile views for code, input space and results, and displays missing measurements explicitly.
+- Bundle files use portable LF endings. Verification checks the complete manifest and compares Python source with the emitter without importing the bundle. Skipped and newly resolved solver replays have distinct verdicts.
+- Generated Rust removes redundant outer parentheses in assignments. IR expressions using transcendental functions select the standard library. All recorded zoo programs and their Pareto candidates compile with warnings denied.
+- The website and benchmark ledger report the same four saved runs as Studio.
+
 ## [0.2.0] - 2026-11-23
 
 ### Added

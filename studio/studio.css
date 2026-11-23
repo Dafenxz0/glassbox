@@ -1,3 +1,14 @@
+@font-face {
+  font-family: Plex;
+  src: url(../assets/fonts/plex-sans.woff2) format("woff2");
+  font-weight: 100 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: PlexMono;
+  src: url(../assets/fonts/plex-mono.woff2) format("woff2");
+  font-display: swap;
+}
 /* GlassBox Studio 2.0 — Taste Skill v2.5.1 + modern-web-guidance */
 
 :root {
@@ -15,23 +26,23 @@
   --p-inv-ink: #ffffff;
   --p-inv-muted: #9a9a9a;
 
-  --bg: light-dark(#ffffff, #111111);
-  --surface: light-dark(#f4f4f4, #1e1e1e);
+  --bg: light-dark(#f5f7fa, #102027);
+  --surface: light-dark(#ffffff, #192a32);
   --surface-elevated: light-dark(#ffffff, #242424);
-  --ink: light-dark(#111111, #ffffff);
-  --muted: light-dark(#6b6b6b, #9a9a9a);
+  --ink: light-dark(#142832, #ecf6f6);
+  --muted: light-dark(#526674, #afc0c8);
   --accent: light-dark(#1a4be0, #4d7cfe);
   --accent-hover: light-dark(#143bb5, #3a6af0);
   --accent-soft: light-dark(#edf2ff, #172645);
   --accent-ink: #ffffff;
-  --border: light-dark(#e2e2e2, #2e2e2e);
+  --border: light-dark(#d1dbe0, #334750);
   --border-strong: light-dark(#c8c8c8, #444444);
 
   /* Terminal / code surfaces (always crisp dark terminal per studio spec) */
-  --code-bg: #111111;
+  --code-bg: #101e24;
   --code-surface: #1a1a1a;
   --code-ink: #f4f4f4;
-  --code-muted: #8c8c8c;
+  --code-muted: #a4b9bc;
   --code-border: #2c2c2c;
   --code-highlight: rgba(77, 124, 254, 0.16);
 
@@ -45,9 +56,9 @@
   --red: light-dark(#c81e1e, #f87171);
   --red-soft: light-dark(#fdecec, #331313);
 
-  --font-display: "Epilogue", system-ui, -apple-system, sans-serif;
-  --font-text: "Epilogue", system-ui, -apple-system, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --font-display: Plex, system-ui, -apple-system, sans-serif;
+  --font-text: Plex, system-ui, -apple-system, sans-serif;
+  --font-mono: PlexMono, ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   --display-tracking: -0.035em;
 
   --r-sm: 4px;
@@ -1620,3 +1631,63 @@ dialog::backdrop {
   font-family: var(--font-mono);
   font-size: 11.5px;
 }
+
+/* The inspector panes share a canvas on desktop and a view switch on narrow screens. */
+[hidden] { display: none !important; }
+.studio-skip { position: absolute; top: -6rem; z-index: 3; background: var(--surface); padding: 12px; }
+.studio-skip:focus { top: 0; }
+.topbar { justify-content: flex-start; padding: 12px clamp(16px, 2vw, 40px); }
+.header-tools { margin-left: auto; }
+.brand-link { font-size: 21px; letter-spacing: -.055em; }
+.brand-product, .mode-pill { font-size: 13px; }
+.run-header { padding: 22px clamp(16px, 2vw, 40px) 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.run-heading p, .source-heading { margin: 0; font: 12px/1.4 var(--font-mono); text-transform: uppercase; letter-spacing: .09em; color: var(--muted); }
+.run-heading h1 { margin: 3px 0 16px; font: 480 clamp(1.7rem, 2.7vw, 2.7rem)/1.12 var(--font-display); letter-spacing: -.055em; overflow-wrap: anywhere; }
+.controls-bar { gap: 8px; }
+.ctrl-field, .ctrl-check, .btn { min-height: 36px; }
+.ctrl-model select { max-width: 240px; }
+.controls-bar :disabled { cursor: default; }
+.workbench { gap: 14px; padding: 18px clamp(12px, 1.6vw, 32px); }
+.card { padding: 15px; }.card-head { flex-wrap: wrap; }
+.card-title { font-size: 16px; letter-spacing: -.025em; text-transform: none; }
+.card-sub, .mri-readout, .slice-note { font-size: 13px; line-height: 1.5; }
+.kpi-label, .file-meta { font-size: 12px; }.kpi-value { font-size: 17px; }
+.source-heading { width: 100%; margin: 12px 0 0; }
+.workbench-header { gap: 2px 8px; }
+.workbench-actions { width: 100%; border-top: 1px solid var(--border); }
+.file-meta { margin-right: auto; overflow-wrap: anywhere; }
+.code-panel-body { font-size: 13px; }
+.tok-cmt { color: #9ab0b3; }
+.mri-legend { flex-wrap: wrap; }
+.pane-switch { display: none; }
+@media (min-width: 1100px) {
+  .workbench { grid-template-columns: minmax(255px, .88fr) minmax(0, 1.65fr) minmax(310px, 1fr); }
+  .pane-left, .pane-right { max-height: max(580px, calc(100dvh - 230px)); }
+  .pane-center { height: max(580px, calc(100dvh - 230px)); }
+}
+@media (max-width: 1099px) {
+  .pane-switch { display: flex; padding: 0 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  .pane-switch button { flex: 1; min-height: 46px; background: transparent; color: var(--muted); font: 550 14px var(--font-text); border: 0; border-bottom: 3px solid transparent; }
+  .pane-switch button[aria-pressed="true"] { color: var(--accent); border-bottom-color: currentColor; }
+  .workbench[data-view="overview"] .pane:not(.pane-left),
+  .workbench[data-view="code"] .pane:not(.pane-center),
+  .workbench[data-view="explore"] .pane:not(.pane-right) { display: none; }
+  .pane-center { height: max(34rem, 75dvh); }
+  .ctrl-field, .ctrl-check, .btn, [role="tab"] { min-height: 44px; }
+  .status-badge { overflow-wrap: anywhere; }
+  .run-header { padding-top: 16px; }
+}
+@media (max-width: 500px) {
+  .controls-bar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ctrl-model { grid-column: 1 / -1; }
+  .ctrl-model select { max-width: 100%; }
+  .controls-bar .ctrl-compact, .controls-bar .ctrl-check { justify-content: space-between; }
+  .controls-bar #btn-decompile { grid-column: 1 / -1; order: 1; }
+  .controls-bar:has(#cfg-smt:disabled) .ctrl-compact,
+  .controls-bar:has(#cfg-smt:disabled) .ctrl-check { display: none; }
+  .topbar { gap: 8px; }.brand-link { font-size: 18px; }.brand-product { font-size: 14px; }
+  .brand-link img { width: 25px; height: 25px; }.topbar-brand { gap: 6px; }
+  .topbar .btn { padding: 5px; }.mode-pill { font-size: 12px; padding: 4px 6px; }
+  .tablist { gap: 0; }[role="tab"] { padding: 6px 8px; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; } }

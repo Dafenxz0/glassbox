@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import importlib.util
 import platform
 import shutil
-import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +34,12 @@ from glassbox.verifier.smt import verify_smt
 
 if TYPE_CHECKING:
     from glassbox.loader import LoadedModel
+
+
+_BUNDLE_FILES = (
+    "model.onnx", "program.ir.json", "certificate.json",
+    "code/model.c", "code/model.h", "code/model.rs", "code/model.py",
+)
 
 
 def compute_file_sha256(path: str | Path) -> str:
@@ -207,6 +211,8 @@ def verify_certificate_integrity(
     actual_model_sha = compute_file_sha256(path)
     if not hmac.compare_digest(actual_model_sha, cert.model_sha256):
         return False
+    if cert.domain != program.domain or cert.domain.task_type != program.task_type:
+        return False
     actual_program_sha = program.sha256()
     if not hmac.compare_digest(actual_program_sha, cert.program_sha256):
         return False
@@ -237,27 +243,18 @@ def write_artifact_bundle(
         code_map = {**emit_all(result.program), **code_map}
 
     (bdir / "program.ir.json").write_text(
-        result.program.model_dump_json(indent=2), encoding="utf-8"
+        result.program.model_dump_json(indent=2), encoding="utf-8", newline="\n"
     )
     (bdir / "certificate.json").write_text(
-        result.certificate.model_dump_json(indent=2), encoding="utf-8"
+        result.certificate.model_dump_json(indent=2), encoding="utf-8", newline="\n"
     )
-    (code_dir / "model.c").write_text(code_map["c"], encoding="utf-8")
-    (code_dir / "model.h").write_text(code_map["h"], encoding="utf-8")
-    (code_dir / "model.rs").write_text(code_map["rust"], encoding="utf-8")
-    (code_dir / "model.py").write_text(code_map["python"], encoding="utf-8")
+    (code_dir / "model.c").write_text(code_map["c"], encoding="utf-8", newline="\n")
+    (code_dir / "model.h").write_text(code_map["h"], encoding="utf-8", newline="\n")
+    (code_dir / "model.rs").write_text(code_map["rust"], encoding="utf-8", newline="\n")
+    (code_dir / "model.py").write_text(code_map["python"], encoding="utf-8", newline="\n")
 
-    rel_files = [
-        "model.onnx",
-        "program.ir.json",
-        "certificate.json",
-        "code/model.c",
-        "code/model.h",
-        "code/model.rs",
-        "code/model.py",
-    ]
     files_sha: dict[str, str] = {
-        rel: compute_file_sha256(bdir / rel) for rel in rel_files
+        rel: compute_file_sha256(bdir / rel) for rel in _BUNDLE_FILES
     }
 
     manifest = ArtifactManifest(
@@ -273,7 +270,7 @@ def write_artifact_bundle(
             smt_timeout_s=result.certificate.smt_timeout_s,
         ),
     )
-    (bdir / "manifest.json").write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+    (bdir / "manifest.json").write_text(manifest.model_dump_json(indent=2), encoding="utf-8", newline="\n")
     return bdir
 
 
@@ -286,9 +283,12 @@ def verify_artifact_bundle(
     from glassbox.loader import load_onnx
 
     t0 = time.perf_counter()
-    bdir = Path(bundle_dir)
-    required = ["manifest.json", "certificate.json", "model.onnx", "program.ir.json"]
-    missing = [rel for rel in required if not (bdir / rel).is_file()]
+    bdir = Path(bundle_dir).resolve()
+    required = ("manifest.json", *_BUNDLE_FILES)
+    missing = [
+        rel for rel in required
+        if not (bdir / rel).is_file() or not (bdir / rel).resolve().is_relative_to(bdir)
+    ]
     if missing:
         return BundleVerificationReport(
             verdict="INVALID_BUNDLE",
@@ -326,8 +326,11 @@ def verify_artifact_bundle(
         )
 
     details: list[str] = []
-    hashes_valid = True
-    for rel, expected_sha in manifest.files.items():
+    hashes_valid = set(manifest.files) == set(_BUNDLE_FILES)
+    if not hashes_valid:
+        details.append("Manifest file list differs from the version 2 bundle format.")
+    for rel in _BUNDLE_FILES:
+        expected_sha = manifest.files.get(rel, "")
         fpath = bdir / rel
         if not fpath.is_file():
             hashes_valid = False
@@ -340,7 +343,7 @@ def verify_artifact_bundle(
 
     if not verify_certificate_integrity(cert, bdir / "model.onnx", program):
         hashes_valid = False
-        details.append("Certificate model_sha256 or program_sha256 does not match bundle contents.")
+        details.append("Certificate domain, hashes or verification flags do not match the bundle.")
 
     if not hashes_valid:
         return BundleVerificationReport(
@@ -395,27 +398,16 @@ def verify_artifact_bundle(
             numerical_ok = False
             details.append("Empirical class disagreement found against PROVEN_REAL_GLOBAL claim.")
 
-    py_path = bdir / "code" / "model.py"
-    if py_path.is_file():
-        spec = importlib.util.spec_from_file_location("glassbox_bundle_model", py_path)
-        if spec is not None and spec.loader is not None:
-            mod = importlib.util.module_from_spec(spec)
-            sys.modules[spec.name] = mod
-            try:
-                spec.loader.exec_module(mod)
-            finally:
-                sys.modules.pop(spec.name, None)
-            infer_fn = getattr(mod, "infer", None)
-            if callable(infer_fn):
-                py_outs = np.asarray(
-                    [infer_fn(row.tolist()) for row in x_check[:32]], dtype=np.float64
-                )
-                py_ir_diff = float(np.max(np.abs(py_outs - ir_y[:32])))
-                if py_ir_diff > 1e-6:
-                    numerical_ok = False
-                    details.append(f"Emitted Python vs IR divergence {py_ir_diff:.3e} > 1e-6.")
-                else:
-                    details.append(f"Emitted Python vs IR max diff: {py_ir_diff:.2e}.")
+    # Compare source as data. The bundle supplies both the files and its manifest.
+    # Never import or execute its Python module as part of verification.
+    from glassbox.emitters import emit_python
+
+    python_bytes = (bdir / "code" / "model.py").read_bytes().replace(b"\r\n", b"\n")
+    if python_bytes != emit_python(program).encode("utf-8"):
+        numerical_ok = False
+        details.append("Python source differs from the installed emitter for this IR.")
+    else:
+        details.append("Python source matches the installed emitter for this IR.")
 
     cfg = (cert.config or manifest.config).model_copy(
         update={
@@ -429,7 +421,7 @@ def verify_artifact_bundle(
     )
 
     smt_replayed = False
-    replayed_status = cert.status
+    replayed_status = VerificationStatus.UNVERIFIED
     if recompute_smt and (cert.smt_checked or cert.status.is_proven):
         smt_res = verify_smt(model, program, cfg, iteration=0)
         smt_replayed = True
@@ -456,6 +448,8 @@ def verify_artifact_bundle(
         if replayed_status == VerificationStatus.COUNTEREXAMPLE_FOUND:
             verdict: Literal[
                 "VERIFIED_REPRODUCED",
+                "ARTIFACTS_CHECKED",
+                "REPLAY_RESOLVED",
                 "HASH_MISMATCH",
                 "FALSIFIED_BY_REPLAY",
                 "TIMEOUT",
@@ -473,8 +467,20 @@ def verify_artifact_bundle(
             verdict = "FALSIFIED_BY_REPLAY"
         else:
             verdict = "VERIFIED_REPRODUCED"
-    else:
+    elif not smt_replayed:
+        verdict = "ARTIFACTS_CHECKED"
+    elif replayed_status == VerificationStatus.TIMEOUT:
+        verdict = "TIMEOUT"
+    elif replayed_status == VerificationStatus.UNKNOWN:
+        verdict = "UNKNOWN"
+    elif cert.status in {VerificationStatus.TIMEOUT, VerificationStatus.UNKNOWN} and (
+        replayed_status.is_proven or replayed_status == VerificationStatus.COUNTEREXAMPLE_FOUND
+    ):
+        verdict = "REPLAY_RESOLVED"
+    elif replayed_status == cert.status:
         verdict = "VERIFIED_REPRODUCED"
+    else:
+        verdict = "FALSIFIED_BY_REPLAY"
 
     return BundleVerificationReport(
         verdict=verdict,

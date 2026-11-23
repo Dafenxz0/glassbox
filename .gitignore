@@ -17,3 +17,6 @@ site/.taste-skill/consistency/
 site/.taste-skill/gate/
 site/shots/
 .coverage
+
+/.taste-skill/
+/site/.taste-skill/build.json

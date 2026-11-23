@@ -1,4 +1,4 @@
-/* GlassBox Studio 2.0 — Certified Pareto Frontier, Deterministic Explain & Real-Arithmetic SMT UI */
+/* GlassBox Studio 2.0 · Certified Pareto Frontier, Deterministic Explain & Real-Arithmetic SMT UI */
 (() => {
   "use strict";
 
@@ -21,21 +21,24 @@
     PROVEN_SMT:
       "Tier 1: Formal Z3 QF_LRA Proof over piecewise-linear domain",
     TIMEOUT:
-      "Z3 Solver Timeout — Unproven within solver deadline",
+      "Z3 Solver Timeout · Unproven within solver deadline",
     UNKNOWN:
-      "Z3 Solver Indeterminate — Incomplete decision procedure",
+      "Z3 Solver Indeterminate · Incomplete decision procedure",
     BOUNDED_EMPIRICAL:
       "Tier 2: Bounded Empirical Grid & Multi-Start Adversarial Verification",
     COUNTEREXAMPLE_FOUND:
-      "Falsified — Concrete Disagreement Witness Found",
+      "Falsified · Concrete Disagreement Witness Found",
     UNVERIFIED:
-      "Unverified — No formal or empirical check completed",
+      "Unverified · No formal or empirical check completed",
   };
 
   const state = {
     mode: "checking", // "live" | "static"
     models: [],
     demoRunsMap: {},
+    selectionVersion: 0,
+    sliceVersion: 0,
+    explanationVersion: 0,
     currentModelId: "",
     currentResult: null,
     currentSlice: null,
@@ -144,13 +147,9 @@
     const tablist = document.querySelector('[role="tablist"]');
     const tabs = Array.from(tablist.querySelectorAll('[role="tab"]'));
     const panels = Array.from(document.querySelectorAll('[role="tabpanel"]'));
-    const hasNativeFocusgroup = "focusGroup" in HTMLElement.prototype;
 
-    if (!hasNativeFocusgroup) {
-      tabs.forEach((tab) => {
-        tab.tabIndex = tab.getAttribute("aria-selected") === "true" ? 0 : -1;
-      });
-    }
+
+    tabs.forEach((tab) => { tab.tabIndex = tab.getAttribute("aria-selected") === "true" ? 0 : -1; });
 
     tabs.forEach((tab) => {
       tab.addEventListener("click", () => activateTab(tab.id));
@@ -183,14 +182,12 @@
     state.activeTabId = tabId;
     const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
     const panels = Array.from(document.querySelectorAll('[role="tabpanel"]'));
-    const hasNativeFocusgroup = "focusGroup" in HTMLElement.prototype;
+
 
     tabs.forEach((tab) => {
       const selected = tab.id === tabId;
       tab.setAttribute("aria-selected", selected ? "true" : "false");
-      if (!hasNativeFocusgroup) {
-        tab.tabIndex = selected ? 0 : -1;
-      }
+      tab.tabIndex = selected ? 0 : -1;
     });
 
     panels.forEach((panel) => {
@@ -198,10 +195,12 @@
       if (isMatch) {
         panel.removeAttribute("hidden");
       } else {
-        panel.setAttribute("hidden", "until-found");
+        panel.setAttribute("hidden", "");
       }
     });
 
+    renderCodeTabs();
+    if (state.currentResult) syncActiveRegimeUi();
     updateWorkbenchActionMeta();
   }
 
@@ -279,8 +278,11 @@
   function setMode(mode) {
     state.mode = mode;
     els.modePill.setAttribute("data-mode", mode);
-    els.modePillText.textContent =
-      mode === "live" ? "Live Engine Connected" : "Static Demo Mode";
+    const recorded = mode === "static";
+    els.modePillText.textContent = recorded ? "Recorded demo" : "Local engine";
+    els.btnDecompile.textContent = recorded ? "Replay iterations" : "Decompile & verify";
+    [els.cfgRegimes, els.cfgEps, els.cfgSmt].forEach((control) => { control.disabled = recorded; });
+
   }
 
   async function initApp() {
@@ -291,22 +293,28 @@
     bindEvents();
 
     try {
-      const liveModels = await fetchJsonWithTimeout("../api/models", 1800);
-      if (Array.isArray(liveModels)) {
-        setMode("live");
-        state.models = liveModels;
-      } else {
-        throw new Error("Invalid ../api/models payload");
-      }
+      const health = await fetchJsonWithTimeout("../api/health", 3000);
+      if (health.status !== "ok") throw new Error("Missing engine");
+      setMode("live");
     } catch {
       setMode("static");
+    }
+    if (state.mode === "static") {
       await loadStaticIndex();
+    } else {
+      try {
+        state.models = await fetchJsonWithTimeout("../api/models", 60000);
+      } catch (err) {
+        showBanner(`Could not load models from the local engine: ${err.message}`);
+        return;
+      }
     }
 
     populateModelSelector();
     if (state.models.length > 0) {
       // Prefer drone_altitude_pid or first model
       const preferred =
+        state.models.find((m) => m.id === new URLSearchParams(location.search).get("model")) ||
         state.models.find((m) => m.id === "drone_altitude_pid") || state.models[0];
       await selectModel(preferred.id);
     } else {
@@ -350,7 +358,25 @@
   }
 
   async function selectModel(modelId) {
+    const version = ++state.selectionVersion;
+    state.streamController?.abort();
+    state.streamController = null;
+    clearTimeout(state.sliceDebounceTimer);
+    state.sliceVersion++;
+    state.explanationVersion++;
     state.currentModelId = modelId;
+    state.currentResult = null;
+    state.currentSlice = null;
+    els.btnOpenCert.disabled = true;
+    els.btnDecompile.disabled = true;
+    els.workbench.hidden = true;
+    els.btnResetPareto.hidden = true;
+    els.paretoPreviewBar.hidden = true;
+    $("run-title").textContent = modelId;
+    const url = new URL(location.href);
+    url.searchParams.set("model", modelId);
+    history.replaceState(null, "", url);
+    showBanner(`Loading ${modelId}…`);
     els.modelSelect.value = modelId;
     state.activeRegimeId = null;
     state.selectedCeIndex = null;
@@ -365,48 +391,31 @@
       if (dc.verify_smt != null) els.cfgSmt.checked = Boolean(dc.verify_smt);
     }
 
-    if (state.mode === "static") {
-      await loadStaticRun(modelId);
-      return;
-    }
-
-    if (modelEntry && modelEntry.has_prebuilt_run) {
-      try {
-        // Load static demo-data slice too if available so default_slice is instant
-        let staticSlice = null;
-        try {
-          const demoRaw = await fetchJsonWithTimeout(`./demo-data/runs/${encodeURIComponent(modelId)}.json`, 1500);
-          staticSlice = demoRaw?.default_slice || null;
-        } catch {
-          staticSlice = null;
-        }
-        const prebuilt = await fetchJsonWithTimeout(`../api/runs/${encodeURIComponent(modelId)}`, 4000);
-        if (staticSlice && !prebuilt.default_slice) {
-          prebuilt.default_slice = staticSlice;
-        }
-        await applyRunData(prebuilt);
-        return;
-      } catch {
-        // Fall through to live decompile
-      }
-    }
-    await runLiveDecompile();
-  }
-
-  async function loadStaticRun(modelId) {
-    const relPath = state.demoRunsMap[modelId] || `runs/${modelId}.json`;
-    const url = relPath.startsWith(".") || relPath.startsWith("/") ? relPath : `./demo-data/${relPath}`;
     try {
-      const raw = await fetchJsonWithTimeout(url, 5000);
-      await applyRunData(raw);
+      if (state.mode === "static" || modelEntry?.has_prebuilt_run) {
+        const relPath = state.demoRunsMap[modelId] || `runs/${encodeURIComponent(modelId)}.json`;
+        let raw;
+        try {
+          raw = await fetchJsonWithTimeout(new URL(relPath, new URL("./demo-data/", location.href)), 15000);
+        } catch (err) {
+          if (state.mode !== "live" || version !== state.selectionVersion) throw err;
+          raw = await fetchJsonWithTimeout(`../api/runs/${encodeURIComponent(modelId)}`, 15000);
+        }
+        if (version === state.selectionVersion) await applyRunData(raw, version);
+      } else {
+        showBanner("Choose the settings for this model, then select Decompile & verify.");
+      }
     } catch (err) {
-      showBanner(`Could not load demo run for ${modelId}: ${err.message}`);
+      if (version === state.selectionVersion) showBanner(`Could not load ${modelId}: ${err.message}`);
+    } finally {
+      if (version === state.selectionVersion) els.btnDecompile.disabled = false;
     }
   }
 
-  async function applyRunData(raw) {
+  async function applyRunData(raw, version) {
+    if (version !== state.selectionVersion) return;
     const { result, defaultSlice } = normalizeRunPayload(raw);
-    if (!result) return;
+    if (!result?.program || !result.certificate) throw new Error("Incomplete run record");
     state.currentResult = result;
     state.activeRegimeId = null;
     state.selectedCeIndex = null;
@@ -418,12 +427,16 @@
       initSliceControls(result.metadata.domain, defaultSlice);
     } else if (state.mode === "live") {
       initSliceControls(result.metadata.domain, null);
-      await requestLiveSlice();
+      if (result.metadata.domain.feature_names.length > 1) await requestLiveSlice();
     } else {
       initSliceControls(result.metadata.domain, null);
       state.currentSlice = null;
     }
 
+    if (version !== state.selectionVersion || result !== state.currentResult) return;
+    els.workbench.hidden = false;
+    els.btnOpenCert.disabled = false;
+    showBanner("");
     renderAllPanels(result);
     renderMriHeatmap();
     initDefaultExplanation(result);
@@ -443,21 +456,23 @@
 
   async function replayStaticCegis() {
     if (!state.currentResult) {
-      await loadStaticRun(state.currentModelId);
+      await selectModel(state.currentModelId);
       return;
     }
     const iters = state.currentResult.certificate?.cegis_iterations || [];
     if (iters.length <= 1) {
-      showBanner("Static Demo Mode: displaying pre-baked verified run. Run `glassbox studio` for live re-synthesis.");
+      showBanner("Static Demo Mode: displaying saved run. Run `glassbox studio` for live re-synthesis.");
       return;
     }
-    showBanner("Static Demo Mode: replaying pre-baked CEGIS trajectory. Run `glassbox studio` for custom parameters.");
+    showBanner("Static Demo Mode: replaying recorded CEGIS iterations. Run `glassbox studio` for custom parameters.");
     els.btnDecompile.disabled = true;
+    const version = state.selectionVersion;
     for (let i = 1; i <= iters.length; i++) {
+      if (version !== state.selectionVersion) return;
       renderCegisChart(iters.slice(0, i), state.currentResult.certificate.tolerance_eps);
       await new Promise((r) => setTimeout(r, 110));
     }
-    els.btnDecompile.disabled = false;
+    if (version === state.selectionVersion) els.btnDecompile.disabled = false;
   }
 
   function readControlsConfig() {
@@ -479,27 +494,32 @@
     if (state.streamController) {
       state.streamController.abort();
     }
-    state.streamController = new AbortController();
+    const controller = new AbortController();
+    state.streamController = controller;
+    const version = state.selectionVersion;
+    const modelId = state.currentModelId;
     const config = readControlsConfig();
 
     els.btnDecompile.disabled = true;
     showBanner(`Decompiling & verifying ${state.currentModelId}...`);
 
     const streamedIters = [];
+    let legacyEndpoint = false;
     try {
       const res = await fetch("../api/decompile/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model_id: state.currentModelId,
+          model_id: modelId,
           config,
           run_benchmarks: true,
         }),
-        signal: state.streamController.signal,
+        signal: controller.signal,
       });
 
       const ct = res.headers.get("content-type") || "";
       if (!res.ok || !ct.includes("text/event-stream") || !res.body) {
+        legacyEndpoint = [404, 405].includes(res.status);
         throw new Error(`SSE unavailable (${res.status})`);
       }
 
@@ -510,6 +530,7 @@
 
       while (true) {
         const { done, value } = await reader.read();
+        if (controller.signal.aborted || version !== state.selectionVersion) return;
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         const frames = buffer.split(/\r?\n\r?\n/);
@@ -543,8 +564,7 @@
             );
           } else if (eventType === "complete") {
             gotComplete = true;
-            await applyRunData(payload);
-            showBanner("");
+            await applyRunData(payload, version);
           } else if (eventType === "error") {
             throw new Error(payload.detail || payload.message || "Decompilation error");
           }
@@ -555,13 +575,18 @@
         throw new Error("Stream ended without complete payload");
       }
     } catch (err) {
-      if (err.name === "AbortError") return;
+      if (controller.signal.aborted || version !== state.selectionVersion) return;
+      if (!legacyEndpoint) {
+        showBanner(`Decompilation failed: ${err.message}`);
+        return;
+      }
       try {
         const res = await fetch("../api/decompile", {
+          signal: controller.signal,
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model_id: state.currentModelId,
+            model_id: modelId,
             config,
             run_benchmarks: true,
           }),
@@ -571,14 +596,15 @@
           throw new Error(text || `HTTP ${res.status}`);
         }
         const data = await res.json();
-        await applyRunData(data);
-        showBanner("");
+        await applyRunData(data, version);
       } catch (fallbackErr) {
-        showBanner(`Decompilation failed: ${fallbackErr.message}`);
+        if (!controller.signal.aborted) showBanner(`Decompilation failed: ${fallbackErr.message}`);
       }
     } finally {
-      els.btnDecompile.disabled = false;
-      state.streamController = null;
+      if (state.streamController === controller) {
+        els.btnDecompile.disabled = false;
+        state.streamController = null;
+      }
     }
   }
 
@@ -594,7 +620,7 @@
       result.certificate?.cegis_iterations || [],
       result.certificate?.tolerance_eps ?? 0.05
     );
-    renderCodeTabs(result);
+    renderCodeTabs();
     renderRegimeGraph(result.program);
     renderCounterexamples(result);
     renderBenchmarks(result.benchmarks || []);
@@ -616,20 +642,14 @@
     els.kpiMaxErr.textContent = fmtNum(cert.max_abs_error, 5);
 
     if (rap) {
-      const scopeTag =
-        rap.scope === "global"
-          ? "GLOBAL (z3.Q)"
-          : rap.scope === "margin_conditioned"
-            ? "MARGIN (z3.Q)"
-            : rap.solver_result.toUpperCase();
-      els.kpiSmt.textContent = scopeTag;
+      els.kpiSmt.textContent = (rap.solver_result || "Unknown").toUpperCase();
       els.kpiLeavesProven.textContent = `${rap.leaves_proven ?? 0} / ${rap.leaves_total ?? 0}`;
     } else {
       els.kpiSmt.textContent = cert.smt_checked
         ? cert.smt_proven
           ? "PROVEN (unsat)"
-          : "REFUTED / BOUNDED"
-        : "Empirical Only";
+          : "Checked"
+        : "Skipped";
       const totalLeaves = collectLeavesWithPaths(result.program?.root).length;
       const provenLeaves = isStatusProven(status) ? totalLeaves : 0;
       els.kpiLeavesProven.textContent = `${provenLeaves} / ${totalLeaves}`;
@@ -637,30 +657,7 @@
   }
 
   function getParetoCandidates(result) {
-    if (Array.isArray(result.pareto_frontier) && result.pareto_frontier.length > 0) {
-      return result.pareto_frontier;
-    }
-    const leaves = collectLeavesWithPaths(result.program?.root);
-    const lastIter =
-      (result.certificate?.cegis_iterations || [])[
-        (result.certificate?.cegis_iterations || []).length - 1
-      ];
-    return [
-      {
-        candidate_id: "default_best",
-        max_regimes_budget: leaves.length || 8,
-        actual_regimes: leaves.length,
-        ast_nodes: lastIter?.ast_nodes || leaves.length * 12,
-        status: result.certificate?.status || "UNVERIFIED",
-        agreement_rate: result.certificate?.agreement_rate ?? 1,
-        max_abs_error: result.certificate?.max_abs_error ?? 0,
-        mean_abs_error: result.certificate?.mean_abs_error ?? 0,
-        is_pareto_optimal: true,
-        code_c: result.code?.c || "",
-        code_rust: result.code?.rust || "",
-        code_python: result.code?.python || "",
-      },
-    ];
+    return result.pareto_frontier || [];
   }
 
   function colorForVerificationStatus(status) {
@@ -673,6 +670,13 @@
   function renderParetoFrontier(result) {
     const candidates = getParetoCandidates(result);
     const svg = els.paretoChart;
+    svg.toggleAttribute("hidden", candidates.length === 0);
+    if (!candidates.length) {
+      svg.replaceChildren();
+      els.paretoPills.textContent = "No Pareto sweep was recorded for this run.";
+      els.paretoCountPill.textContent = "No sweep";
+      return;
+    }
     els.paretoCountPill.textContent = `${candidates.length} pt${candidates.length === 1 ? "" : "s"}`;
 
     const W = 320;
@@ -775,9 +779,7 @@
     els.paretoPreviewBar.hidden = false;
     els.paretoPreviewText.textContent = `Pareto Candidate (${cand.actual_regimes} regimes, ${cand.ast_nodes} AST nodes, max |Δ|=${fmtNum(cand.max_abs_error, 4)}, ${cand.status})`;
 
-    if (cand.code_c) renderCodePane(els.codeC, cand.code_c, "c");
-    if (cand.code_rust) renderCodePane(els.codeRust, cand.code_rust, "rust");
-    if (cand.code_python) renderCodePane(els.codePython, cand.code_python, "python");
+    renderCodeTabs();
 
     renderParetoFrontier(state.currentResult);
     updateWorkbenchActionMeta();
@@ -788,7 +790,7 @@
     els.btnResetPareto.hidden = true;
     els.paretoPreviewBar.hidden = true;
     if (state.currentResult) {
-      renderCodeTabs(state.currentResult);
+      renderCodeTabs();
       renderParetoFrontier(state.currentResult);
       syncActiveRegimeUi();
       updateWorkbenchActionMeta();
@@ -1223,25 +1225,28 @@
       .join("");
   }
 
-  function renderCodeTabs(result) {
-    const code = result.code || {};
-    renderCodePane(els.codeC, code.c, "c");
-    renderCodePane(els.codeH, code.h, "c");
-    renderCodePane(els.codeRust, code.rust, "rust");
-    renderCodePane(els.codePython, code.python, "python");
-    const certJson = JSON.stringify(result.certificate || {}, null, 2);
-    renderCodePane(els.codeCert, certJson, "json");
+  function renderCodeTabs() {
+    const pane = {
+      "tab-c": [els.codeC, "c"], "tab-h": [els.codeH, "c"],
+      "tab-rust": [els.codeRust, "rust"], "tab-python": [els.codePython, "python"],
+      "tab-cert": [els.codeCert, "json"],
+    }[state.activeTabId];
+    if (!pane || !state.currentResult) return;
+    const [container, language] = pane;
+    renderCodePane(container, getActiveTargetInfo().text, language);
   }
 
   function getActiveTargetInfo() {
     const code = state.currentResult?.code || {};
-    const name = state.currentResult?.metadata?.name || state.currentModelId || "program";
+    const baseName = state.currentResult?.metadata?.name || state.currentModelId || "program";
     let cand = null;
     if (state.selectedParetoId && state.currentResult) {
       cand = getParetoCandidates(state.currentResult).find(
         (c) => c.candidate_id === state.selectedParetoId
       );
     }
+    const name = cand && ["tab-c", "tab-rust", "tab-python"].includes(state.activeTabId)
+      ? `${baseName}_${cand.candidate_id}` : baseName;
     switch (state.activeTabId) {
       case "tab-c":
         return { target: "c", filename: `${name}.c`, text: cand?.code_c || code.c || "" };
@@ -1463,28 +1468,14 @@
       value: progOut[idx],
     }));
 
-    let nnOut = progOut;
-    let absErr = 0;
-    if (ce && Array.isArray(ce.nn_output)) {
-      nnOut = ce.nn_output;
-      absErr = Number(ce.max_abs_error ?? 0);
-    } else if (gridCell) {
-      if (gridCell.nnVal != null) nnOut = [Number(gridCell.nnVal)];
-      if (gridCell.diffVal != null) absErr = Number(gridCell.diffVal);
-    }
-
+    const nnOut = ce?.nn_output || (gridCell?.nnVal != null ? [gridCell.nnVal] : null);
+    const absErr = ce?.nn_output?.length === progOut.length
+      ? Math.max(...progOut.map((value, i) => Math.abs(value - ce.nn_output[i])))
+      : gridCell?.diffVal ?? null;
     const proven = isLeafProven(result, leaf.regime_id);
-    const prof = getRegimeNeuronProfile(result, leaf.regime_id);
-    const activeNeurons = (prof?.top_active_neurons || prof?.top_neurons || []).map((n) => ({
-      layer: n.layer ?? 0,
-      neuron: n.neuron ?? n.index ?? 0,
-      activation_rate: n.activation_rate,
-      value: n.mean_value ?? n.value ?? n.activation_rate ?? 0,
-    }));
-
     const xFmt = xVec.map((v, i) => `${domain.feature_names?.[i] || `x${i}`}=${Number(v).toFixed(3)}`).join(", ");
     const outFmt = formulaTrace.map((f) => `${f.output_name}=${fmtNum(f.value, 4)}`).join(", ");
-    const summaryText = `Input (${xFmt}) satisfies ${guardTrace.length} guard step${guardTrace.length === 1 ? "" : "s"} → routes to Regime R${leaf.regime_id} (${leaf.name}${leaf.class_name ? `, class ${leaf.class_name}` : ""}), evaluating symbolic law to ${outFmt} (|Δ|=${fmtNum(absErr, 5)}, leaf ${proven ? "formally proven via Z3 QF_LRA" : "empirically bounded"}).`;
+    const summaryText = `Input (${xFmt}) satisfies ${guardTrace.length} guard step${guardTrace.length === 1 ? "" : "s"} → routes to Regime R${leaf.regime_id} (${leaf.name}${leaf.class_name ? `, class ${leaf.class_name}` : ""}), evaluating symbolic law to ${outFmt} (|Δ|=${fmtNum(absErr, 5)}, leaf ${proven ? "formally proven via Z3 QF_LRA" : "no recorded formal proof"}).`;
 
     return {
       x: xVec,
@@ -1496,7 +1487,7 @@
       nn_output: nnOut,
       program_output: progOut,
       abs_error: absErr,
-      active_neurons: activeNeurons,
+      active_neurons: [],
       summary_text: summaryText,
     };
   }
@@ -1530,6 +1521,7 @@
       btn.addEventListener("click", () => {
         const p = pills[Number(btn.getAttribute("data-sample-idx"))];
         if (p.sample) {
+          state.explanationVersion++;
           state.explainedPoint = p.sample.x;
           renderExplanationPanel(p.sample);
           renderMriHeatmap();
@@ -1553,6 +1545,8 @@
 
   async function explainInputPoint(xVec, { gridCell = null, ce = null, syncRegime = true } = {}) {
     if (!state.currentResult || !Array.isArray(xVec)) return;
+    const sequence = ++state.explanationVersion;
+    const result = state.currentResult;
     state.explainedPoint = xVec;
 
     let explanation = null;
@@ -1584,6 +1578,7 @@
       }
     }
 
+    if (sequence !== state.explanationVersion || result !== state.currentResult) return;
     if (!explanation) {
       explanation = buildClientExplanation(xVec, gridCell, ce);
     }
@@ -1601,8 +1596,8 @@
 
   function renderExplanationPanel(exp) {
     if (!exp) return;
-    const provenStatus = exp.regime_proven ? "PROVEN_REAL_GLOBAL" : "BOUNDED_EMPIRICAL";
-    els.explainRegimeBadge.textContent = `R${exp.regime_id} · ${exp.regime_proven ? "PROVEN LEAF" : "EMPIRICAL LEAF"}`;
+    const provenStatus = exp.regime_proven ? "PROVEN_REAL_GLOBAL" : "UNVERIFIED";
+    els.explainRegimeBadge.textContent = `R${exp.regime_id} · ${exp.regime_proven ? "PROVEN LEAF" : "NO LEAF PROOF"}`;
     els.explainRegimeBadge.setAttribute("data-status", provenStatus);
 
     const guardsHtml =
@@ -1654,18 +1649,6 @@
       }
     });
 
-    // Fallback to regime_neuron_profiles if active_neurons wasn't populated
-    if (flatNeurons.length === 0 && state.currentResult) {
-      const prof = getRegimeNeuronProfile(state.currentResult, exp.regime_id);
-      (prof?.top_active_neurons || prof?.top_neurons || []).forEach((n) => {
-        flatNeurons.push({
-          label: `L${n.layer ?? 0}:N${n.neuron ?? n.index ?? 0}`,
-          val: Number(n.activation_rate ?? n.mean_value ?? 0),
-          isRate: n.activation_rate != null,
-        });
-      });
-    }
-
     const maxNeuronVal = Math.max(...flatNeurons.map((n) => Math.abs(n.val)), 1);
     const neuronsHtml =
       flatNeurons.length > 0
@@ -1686,7 +1669,7 @@
               })
               .join("")}
           </div>`
-        : `<p class="card-sub">No hidden ReLU activation profile for this architecture.</p>`;
+        : `<p class="card-sub">No point-specific neuron measurements were recorded.</p>`;
 
     els.explainContent.innerHTML = `
       <div class="explain-summary-box">${escapeHtml(exp.summary_text || `Routed to Regime R${exp.regime_id} (${exp.regime_name}).`)}</div>
@@ -1748,7 +1731,7 @@
     els.sliceDimX.disabled = isStatic;
     els.sliceDimY.disabled = isStatic;
     if (isStatic && names.length > 2) {
-      els.sliceModeNote.textContent = "Static Demo Mode shows the pre-baked 2D slice. Click any pixel to run client-side decision tracing!";
+      els.sliceModeNote.textContent = "Recorded slice. Select a point to inspect the program’s decision.";
       els.sliceModeNote.hidden = false;
     } else {
       els.sliceModeNote.hidden = true;
@@ -1778,6 +1761,7 @@
 
   function scheduleLiveSlice() {
     if (state.mode !== "live") return;
+    state.sliceVersion++;
     clearTimeout(state.sliceDebounceTimer);
     state.sliceDebounceTimer = setTimeout(requestLiveSlice, 140);
   }
@@ -1787,6 +1771,8 @@
     const dimX = Number(els.sliceDimX.value);
     const dimY = Number(els.sliceDimY.value);
     const fixedValues = getFixedPointVector();
+    const sequence = ++state.sliceVersion;
+    const result = state.currentResult;
 
     try {
       const res = await fetch("../api/slice", {
@@ -1800,11 +1786,16 @@
           resolution: 48,
         }),
       });
-      if (!res.ok) return;
-      state.currentSlice = await res.json();
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const slice = await res.json();
+      if (sequence !== state.sliceVersion || result !== state.currentResult) return;
+      state.currentSlice = slice;
       renderMriHeatmap();
-    } catch {
-      // Non-fatal slice preview error
+    } catch (err) {
+      if (sequence !== state.sliceVersion || result !== state.currentResult) return;
+      state.currentSlice = null;
+      renderMriHeatmap();
+      els.mriReadout.textContent = `Slice unavailable: ${err.message}`;
     }
   }
 
@@ -2020,10 +2011,10 @@
     const midX = (xMin + xMax) / 2;
     els.mriXTicks.innerHTML = `<span>${xMin.toFixed(2)}</span><span>${midX.toFixed(2)}</span><span>${xMax.toFixed(2)}</span>`;
 
-    renderMriLegend(kind, minV, maxV, eps);
+    renderMriLegend(kind, minV, maxV, eps, grid);
   }
 
-  function renderMriLegend(kind, minV, maxV, eps) {
+  function renderMriLegend(kind, minV, maxV, eps, grid) {
     if (kind === "diff") {
       els.mriLegend.innerHTML = `
         <span>0</span>
@@ -2036,8 +2027,8 @@
         <span>${fmtNum(maxV, 2)}</span>`;
     } else {
       const label = kind === "regime" ? "Regimes" : "Classes";
-      const chips = CATEGORICAL_PALETTE.slice(0, 6)
-        .map((c, i) => `<span class="legend-item"><span class="legend-swatch" style="background:${c};height:8px;width:8px"></span>${i}</span>`)
+      const chips = [...new Set(grid.flat())].sort((a, b) => a - b)
+        .map((i) => `<span class="legend-item"><span class="legend-swatch" style="background:${colorForCategory(i)};height:8px;width:8px"></span>${i}</span>`)
         .join("");
       els.mriLegend.innerHTML = `<span>${label}:</span>${chips}`;
     }
@@ -2166,21 +2157,22 @@
 
     const rap = cert.real_arithmetic_proof || {};
     const nda = cert.numerical_deployment_assurance || {};
-    const modelName = cert.model_name || state.currentModelId || "model";
-    const cliCmd = `glassbox verify bundles/${modelName}.gbundle`;
+    const packaged = state.currentResult.run_id === "drone_altitude_pid" &&
+      cert.program_sha256 === "90866193c1c6d3f090655c9680b0c53589a1834787cbd65e4df75d7ec924cc4a";
+    const cliCmd = packaged ? "glassbox verify bundles/drone_altitude_pid.gbundle --timeout 30" : null;
 
     const tier1Items = [
       ["Proof Status", cert.status],
-      ["Exact Rationals (z3.Q)", String(rap.exact_rationals ?? cert.smt_checked)],
-      ["Sound Outward IBP Bounds", String(rap.sound_bounds_only ?? true)],
-      ["Proof Scope", rap.scope || (cert.smt_proven ? "global" : "none")],
-      ["Solver Result", rap.solver_result || (cert.smt_proven ? "unsat" : "sat")],
-      ["Z3 Solver Version", rap.z3_version || cert.tool_versions?.z3 || "z3-solver"],
+      ["Exact Rationals (z3.Q)", String(rap.exact_rationals ?? "Unrecorded")],
+      ["Sound Outward IBP Bounds", String(rap.sound_bounds_only ?? "Unrecorded")],
+      ["Query scope", rap.scope ?? "Unrecorded"],
+      ["Solver Result", rap.solver_result ?? "Unrecorded"],
+      ["Z3 Solver Version", rap.z3_version || cert.tool_versions?.z3 || "Unrecorded"],
       [
         "Leaves Proven",
         rap.leaves_total != null
           ? `${rap.leaves_proven} / ${rap.leaves_total}`
-          : String(cert.smt_proven ? "All" : "0"),
+          : "Unrecorded",
       ],
       ["Tolerance ε / Margin", `ε=${cert.tolerance_eps} / margin=${cert.classification_margin}`],
     ];
@@ -2188,10 +2180,10 @@
     const tier2Items = [
       ["Empirical Agreement", `${(cert.agreement_rate * 100).toFixed(3)}%`],
       ["IR vs ONNX Max |Δ|", fmtNum(nda.ir_vs_onnx_max_diff ?? cert.max_abs_error, 6)],
-      ["C99 vs IR Max |Δ|", nda.c99_vs_ir_max_diff != null ? fmtNum(nda.c99_vs_ir_max_diff, 6) : "< 1e-14"],
-      ["Python vs IR Max |Δ|", nda.python_vs_ir_max_diff != null ? fmtNum(nda.python_vs_ir_max_diff, 6) : "< 1e-14"],
-      ["C99 Compiler", nda.c99_compiler || "ziglang cc / gcc / clang -O3 -std=c99"],
-      ["ORT Samples Checked", String(nda.onnxruntime_samples_checked || 4096)],
+      ["C99 vs IR Max |Δ|", nda.c99_vs_ir_max_diff != null ? fmtNum(nda.c99_vs_ir_max_diff, 6) : "Unmeasured"],
+      ["Python vs IR Max |Δ|", nda.python_vs_ir_max_diff != null ? fmtNum(nda.python_vs_ir_max_diff, 6) : "Unmeasured"],
+      ["C99 Compiler", nda.c99_compiler || "Unrecorded"],
+      ["ORT Samples Checked", String(nda.onnxruntime_samples_checked ?? "Unrecorded")],
       ["Model SHA-256", cert.model_sha256],
       ["Program SHA-256", cert.program_sha256],
     ];
@@ -2209,11 +2201,11 @@
 
     els.certDialogContent.innerHTML = `
       <div class="cert-tier-section">
-        <h3 class="cert-tier-title">Tier 1 — Real-Arithmetic Proof (Exact Rational Z3 QF_LRA)</h3>
+        <h3 class="cert-tier-title">Tier 1 · Real-Arithmetic Proof (Exact Rational Z3 QF_LRA)</h3>
         ${renderGrid(tier1Items)}
       </div>
       <div class="cert-tier-section">
-        <h3 class="cert-tier-title">Tier 2 — Numerical Deployment Assurance (Float32 ORT &amp; Compiled Targets)</h3>
+        <h3 class="cert-tier-title">Tier 2 · Numerical Deployment Assurance (Float32 ORT &amp; Compiled Targets)</h3>
         ${renderGrid(tier2Items)}
         <p class="card-sub" style="margin-top:8px;margin-bottom:0">${escapeHtml(
           nda.float32_soundness_note ||
@@ -2222,10 +2214,10 @@
       </div>
       <div class="cert-tier-section">
         <h3 class="cert-tier-title">Independent Third-Party Bundle Verification</h3>
-        <div class="cert-cli-box">
+        ${cliCmd ? `<div class="cert-cli-box">
           <code id="cert-cli-cmd">${escapeHtml(cliCmd)}</code>
-          <button type="button" id="btn-copy-verify-cli" class="btn btn-sm btn-secondary">Copy Command</button>
-        </div>
+          <button type="button" id="btn-copy-verify-cli" class="btn btn-sm btn-secondary">Copy command</button>
+        </div>` : '<p class="card-sub">To create a replayable bundle locally, run <code>glassbox decompile</code> with <code>--bundle</code>.</p>'}
       </div>
     `;
 
@@ -2282,6 +2274,7 @@
     els.modePill = $("mode-pill");
     els.modePillText = $("mode-pill-text");
     els.modelSelect = $("model-select");
+    els.workbench = $("workbench");
     els.cfgRegimes = $("cfg-regimes");
     els.cfgEps = $("cfg-eps");
     els.cfgSmt = $("cfg-smt");
@@ -2365,6 +2358,14 @@
   }
 
   function bindEvents() {
+    document.querySelectorAll("[data-pane]").forEach((button) => {
+      button.addEventListener("click", () => {
+        els.workbench.dataset.view = button.dataset.pane;
+        document.querySelectorAll("[data-pane]").forEach((item) => {
+          item.setAttribute("aria-pressed", String(item === button));
+        });
+      });
+    });
     els.statusBannerDismiss.addEventListener("click", () => showBanner(""));
     els.modelSelect.addEventListener("change", () => selectModel(els.modelSelect.value));
     els.decompileControls.addEventListener("submit", handleDecompileSubmit);
@@ -2436,8 +2437,14 @@
     });
 
     els.mriViewSelect.addEventListener("change", renderMriHeatmap);
-    const onAxisChange = () => {
+    const onAxisChange = (event) => {
       if (!state.currentResult?.metadata?.domain) return;
+      if (els.sliceDimX.value === els.sliceDimY.value) {
+        const other = event.target === els.sliceDimX ? els.sliceDimY : els.sliceDimX;
+        const next = [...other.options].find((option) => option.value !== event.target.value);
+        if (!next) return;
+        other.value = next.value;
+      }
       renderFixedDimSliders(
         state.currentResult.metadata.domain,
         Number(els.sliceDimX.value),
@@ -2508,7 +2515,7 @@
     const ny = slice.diff_grid.length;
     const nx = slice.diff_grid[0].length;
     const c = Math.floor(fx * nx);
-    const r = Math.floor((1 - fy) * ny);
+    const r = Math.min(ny - 1, Math.floor((1 - fy) * ny));
 
     const xVec = Array.isArray(slice.fixed_values)
       ? [...slice.fixed_values]
